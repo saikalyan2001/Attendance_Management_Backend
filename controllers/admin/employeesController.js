@@ -1,5 +1,7 @@
 import Employee from '../../models/Employee.js';
 import Location from '../../models/Location.js';
+import fs from 'fs/promises';
+import path from 'path';
 
 export const getEmployees = async (req, res) => {
   try {
@@ -87,5 +89,63 @@ export const updateEmployee = async (req, res) => {
     res.json(updatedEmployee);
   } catch (error) {
     res.status(500).json({ message: 'Failed to update employee' });
+  }
+};
+
+export const uploadDocument = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    const document = {
+      name: req.file.originalname,
+      path: `/uploads/${req.file.filename}`,
+      uploadedAt: new Date(),
+    };
+
+    employee.documents.push(document);
+    await employee.save();
+
+    const updatedEmployee = await Employee.findById(id).populate('location', 'name');
+    res.status(201).json(updatedEmployee);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to upload document' });
+  }
+};
+
+export const deleteDocument = async (req, res) => {
+  try {
+    const { id, documentId } = req.params;
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    const document = employee.documents.id(documentId);
+    if (!document) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    const filePath = path.join(path.resolve(), 'uploads', path.basename(document.path));
+    try {
+      await fs.unlink(filePath);
+    } catch (err) {
+      console.error('Failed to delete file:', err);
+    }
+
+    employee.documents.pull(documentId);
+    await employee.save();
+
+    const updatedEmployee = await Employee.findById(id).populate('location', 'name');
+    res.json(updatedEmployee);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete document' });
   }
 };
