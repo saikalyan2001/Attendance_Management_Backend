@@ -2,10 +2,12 @@ import express from 'express';
 import {
   registerEmployee,
   getEmployees,
+  getEmployee,
   editEmployee,
   transferEmployee,
   uploadDocument,
   deleteEmployee,
+  bulkRegisterEmployees,
 } from '../../controllers/siteincharge/employeesController.js';
 import multer from 'multer';
 import path from 'path';
@@ -41,7 +43,9 @@ const upload = multer({
 const router = express.Router();
 
 router.post('/employees/register', upload.array('documents'), registerEmployee);
+router.post('/employees/bulk', bulkRegisterEmployees);
 router.get('/employees', getEmployees);
+router.get('/employees/:id', getEmployee);
 router.put('/employees/:id', editEmployee);
 router.put('/employees/:id/transfer', transferEmployee);
 router.post('/employees/:id/documents', upload.array('documents'), uploadDocument);

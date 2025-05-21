@@ -67,15 +67,32 @@ export const createEmployee = async (req, res) => {
 export const updateEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const { designation, department, location } = req.body;
+    const { employeeId, name, email, designation, department, salary, location, phone, dob, paidLeaves } = req.body;
 
     const employee = await Employee.findById(id);
     if (!employee) {
       return res.status(404).json({ message: 'Employee not found' });
     }
 
+    if (employeeId && employeeId !== employee.employeeId) {
+      const existingEmployee = await Employee.findOne({ employeeId });
+      if (existingEmployee) {
+        return res.status(400).json({ message: 'Employee ID already exists' });
+      }
+      employee.employeeId = employeeId;
+    }
+
+    if (email && email !== employee.email) {
+      const existingEmployee = await Employee.findOne({ email });
+      if (existingEmployee) {
+        return res.status(400).json({ message: 'Email already exists' });
+      }
+      employee.email = email;
+    }
+
     if (designation) employee.designation = designation;
     if (department) employee.department = department;
+    if (salary) employee.salary = salary;
     if (location) {
       const locationExists = await Location.findById(location);
       if (!locationExists) {
@@ -83,12 +100,43 @@ export const updateEmployee = async (req, res) => {
       }
       employee.location = location;
     }
+    if (phone) employee.phone = phone;
+    if (dob) employee.dob = dob;
+    if (paidLeaves) employee.paidLeaves = {
+      ...employee.paidLeaves,
+      ...paidLeaves,
+    };
 
     await employee.save();
     const updatedEmployee = await Employee.findById(id).populate('location', 'name');
     res.json(updatedEmployee);
   } catch (error) {
     res.status(500).json({ message: 'Failed to update employee' });
+  }
+};
+
+export const deleteEmployee = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    // Delete associated documents from filesystem
+    for (const doc of employee.documents) {
+      const filePath = path.join(path.resolve(), 'uploads', path.basename(doc.path));
+      try {
+        await fs.unlink(filePath);
+      } catch (err) {
+        console.error('Failed to delete file:', err);
+      }
+    }
+
+    await Employee.deleteOne({ _id: id });
+    res.json({ message: 'Employee deleted successfully', id });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete employee' });
   }
 };
 
@@ -133,7 +181,7 @@ export const deleteDocument = async (req, res) => {
       return res.status(404).json({ message: 'Document not found' });
     }
 
-    const filePath = path.join(path.resolve(), 'uploads', path.basename(document.path));
+    const filePath = path.join(path.resolve(), 'Uploads', path.basename(document.path));
     try {
       await fs.unlink(filePath);
     } catch (err) {

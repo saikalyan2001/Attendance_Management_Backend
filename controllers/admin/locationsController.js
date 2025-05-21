@@ -5,7 +5,13 @@ import Employee from '../../models/Employee.js';
 export const getLocations = async (req, res) => {
   try {
     const locations = await Location.find().lean();
-    res.json(locations);
+    const locationsWithCount = await Promise.all(
+      locations.map(async (loc) => {
+        const employeeCount = await Employee.countDocuments({ location: loc._id });
+        return { ...loc, employeeCount };
+      })
+    );
+    res.json(locationsWithCount);
   } catch (error) {
     console.error('Get locations error:', error.message);
     res.status(500).json({ message: 'Server error while fetching locations' });
@@ -28,7 +34,7 @@ export const addLocation = async (req, res) => {
     const location = new Location({ name, address });
     await location.save();
 
-    res.status(201).json(location);
+    res.status(201).json({ ...location.toObject(), employeeCount: 0 });
   } catch (error) {
     console.error('Add location error:', error.message);
     res.status(500).json({ message: 'Server error while adding location' });
@@ -65,7 +71,8 @@ export const editLocation = async (req, res) => {
     location.address = address;
     await location.save();
 
-    res.json(location);
+    const employeeCount = await Employee.countDocuments({ location: id });
+    res.json({ ...location.toObject(), employeeCount });
   } catch (error) {
     console.error('Edit location error:', error.message);
     res.status(500).json({ message: 'Server error while editing location' });

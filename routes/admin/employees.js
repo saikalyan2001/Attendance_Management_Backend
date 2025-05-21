@@ -1,5 +1,5 @@
 import express from 'express';
-import { getEmployees, createEmployee, updateEmployee, uploadDocument, deleteDocument } from '../../controllers/admin/employeesController.js';
+import { getEmployees, createEmployee, updateEmployee, uploadDocument, deleteDocument, deleteEmployee } from '../../controllers/admin/employeesController.js';
 import multer from 'multer';
 import path from 'path';
 
@@ -33,5 +33,6 @@ router.post('/employees', createEmployee);
 router.put('/employees/:id', updateEmployee);
 router.post('/employees/:id/documents', upload.single('document'), uploadDocument);
 router.delete('/employees/:id/documents/:documentId', deleteDocument);
+router.delete('/employees/:id', deleteEmployee);
 
 export default router;

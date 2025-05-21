@@ -6,9 +6,9 @@ const employeeSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   designation: { type: String, required: true },
   department: { type: String, required: true },
-  salary: { type: Number, required: true },
+  salary: { type: Number, required: true, min: 1000 },
   paidLeaves: {
-    available: { type: Number, default: 0 },
+    available: { type: Number, default: 3 },
     used: { type: Number, default: 0 },
     carriedForward: { type: Number, default: 0 },
   },

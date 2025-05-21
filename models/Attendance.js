@@ -18,18 +18,8 @@ const attendanceSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['present', 'absent', 'leave'],
+      enum: ['present', 'absent', 'leave', 'half-day'],
       default: 'present',
-    },
-    markedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: false, // Made optional for no-auth setup
-    },
-    editedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: false, // Made optional for consistency
     },
   },
   { timestamps: true }

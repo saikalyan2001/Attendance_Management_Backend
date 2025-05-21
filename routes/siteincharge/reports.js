@@ -1,8 +1,9 @@
 import express from 'express';
-import { getReports } from '../../controllers/siteincharge/reportsController.js';
+import { getAttendanceReports, getLeaveReports } from '../../controllers/siteincharge/reportsController.js';
 
 const router = express.Router();
 
-router.get('/reports', getReports);
+router.get('/reports/attendance', getAttendanceReports);
+router.get('/reports/leaves', getLeaveReports);
 
 export default router;

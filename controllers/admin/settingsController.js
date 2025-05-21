@@ -1,4 +1,5 @@
 import Settings from '../../models/Settings.js';
+import Employee from '../../models/Employee.js';
 
 export const getSettings = async (req, res) => {
   try {
@@ -37,6 +38,39 @@ export const updateSettings = async (req, res) => {
     res.json(settings);
   } catch (error) {
     console.error('Update settings error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const updateEmployeeLeaves = async (req, res) => {
+  try {
+    const settings = await Settings.findOne();
+    if (!settings) {
+      return res.status(404).json({ message: 'Settings not found' });
+    }
+
+    const { paidLeavesPerMonth } = settings;
+    const employees = await Employee.find();
+
+    const updatedEmployees = await Promise.all(
+      employees.map(async (employee) => {
+        const newAvailable = employee.paidLeaves.available + paidLeavesPerMonth;
+        return await Employee.findByIdAndUpdate(
+          employee._id,
+          {
+            $set: {
+              'paidLeaves.available': Math.min(newAvailable, 30), // Cap at 30 leaves
+              'paidLeaves.carriedForward': Math.max(0, newAvailable - 30), // Carry forward excess
+            },
+          },
+          { new: true }
+        );
+      })
+    );
+
+    res.json({ message: 'Employee leaves updated successfully', updatedEmployees });
+  } catch (error) {
+    console.error('Update employee leaves error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };

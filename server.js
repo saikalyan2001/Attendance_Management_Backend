@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 import path from 'path';
 import authRoutes from './routes/auth.js';
-import siteInchargeRoutes from './routes/siteincharge/dashboard.js';
+import siteInchargeRoutes from './routes/siteincharge/Dashboard.js';
 import siteInchargeAttendanceRoutes from './routes/siteincharge/attendance.js';
 import siteInchargeEmployeeRoutes from './routes/siteincharge/employee.js';
 import siteInchargeReportsRoutes from './routes/siteincharge/reports.js';
