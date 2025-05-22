@@ -4,7 +4,12 @@ import Employee from '../../models/Employee.js';
 
 export const getLocations = async (req, res) => {
   try {
-    const locations = await Location.find().lean();
+    const { user } = req;
+    let query = {};
+    if (user.role === 'siteincharge') {
+      query._id = { $in: user.locations };
+    }
+    const locations = await Location.find(query).lean();
     const locationsWithCount = await Promise.all(
       locations.map(async (loc) => {
         const employeeCount = await Employee.countDocuments({ location: loc._id });

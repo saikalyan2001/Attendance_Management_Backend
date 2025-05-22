@@ -66,7 +66,7 @@ export const markAttendance = async (req, res) => {
       location,
       date: new Date(date),
       status: absentEmployees.includes(emp._id.toString()) ? 'absent' : 'present',
-      markedBy: null, // Explicitly null since no auth
+      markedBy: req.user?._id || null, // Use req.user if available
     }));
 
     await Attendance.insertMany(attendanceRecords);
@@ -81,8 +81,8 @@ export const editAttendance = async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-    if (!status || !['present', 'absent', 'leave'].includes(status)) {
-      return res.status(400).json({ message: 'Valid status is required (present, absent, leave)' });
+    if (!status || !['present', 'absent', 'leave', 'half-day'].includes(status)) {
+      return res.status(400).json({ message: 'Valid status is required (present, absent, leave, half-day)' });
     }
 
     const attendance = await Attendance.findById(id);
@@ -91,7 +91,7 @@ export const editAttendance = async (req, res) => {
     }
 
     attendance.status = status;
-    attendance.editedBy = null; // Explicitly null since no auth
+    attendance.editedBy = req.user?._id || null; // Use req.user if available
     await attendance.save();
 
     res.json({ message: 'Attendance updated successfully' });
@@ -130,7 +130,7 @@ export const handleAttendanceRequest = async (req, res) => {
 
     request.status = status;
     request.reviewedAt = new Date();
-    request.reviewedBy = null; // Explicitly null since no auth
+    request.reviewedBy = req.user?._id || null; // Use req.user if available
     await request.save();
 
     if (status === 'approved') {
@@ -141,7 +141,7 @@ export const handleAttendanceRequest = async (req, res) => {
       });
       if (attendance) {
         attendance.status = request.requestedStatus;
-        attendance.editedBy = null; // Explicitly null
+        attendance.editedBy = req.user?._id || null; // Use req.user if available
         await attendance.save();
       }
     }
@@ -159,8 +159,8 @@ export const requestAttendanceEdit = async (req, res) => {
     if (!attendanceId || !requestedStatus || !reason) {
       return res.status(400).json({ message: 'Attendance ID, requested status, and reason are required' });
     }
-    if (!['present', 'absent', 'leave'].includes(requestedStatus)) {
-      return res.status(400).json({ message: 'Invalid requested status (present, absent, leave)' });
+    if (!['present', 'absent', 'leave', 'half-day'].includes(requestedStatus)) {
+      return res.status(400).json({ message: 'Invalid requested status (present, absent, leave, half-day)' });
     }
 
     const attendance = await Attendance.findById(attendanceId);
@@ -175,7 +175,7 @@ export const requestAttendanceEdit = async (req, res) => {
       requestedStatus,
       reason,
       status: 'pending',
-      requestedBy: null, // Explicitly null since no auth
+      requestedBy: req.user?._id || null, // Use req.user if available
     });
 
     await request.save();

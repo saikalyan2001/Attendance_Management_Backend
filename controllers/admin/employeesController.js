@@ -1,36 +1,43 @@
+import mongoose from 'mongoose';
 import Employee from '../../models/Employee.js';
 import Location from '../../models/Location.js';
-import fs from 'fs/promises';
-import path from 'path';
+import Settings from '../../models/Settings.js';
+import { deleteFile, uploadFile } from '../../utils/fileUtils.js';
 
 export const getEmployees = async (req, res) => {
   try {
     const { location } = req.query;
-    const query = {};
-    if (location) query.location = location;
+    const { user } = req;
+    let query = {};
 
-    const employees = await Employee.find(query).populate('location', 'name');
+    if (location && mongoose.isValidObjectId(location)) {
+      query.location = location;
+    }
+
+    if (user.role === 'siteincharge') {
+      query.location = { $in: user.locations };
+    }
+
+    const employees = await Employee.find(query)
+      .populate('location')
+      .lean();
+
     res.json(employees);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to fetch employees' });
+    console.error('Get employees error:', error.message);
+    res.status(500).json({ message: 'Server error while fetching employees' });
   }
 };
 
-export const createEmployee = async (req, res) => {
+export const addEmployee = async (req, res) => {
   try {
-    const {
-      employeeId,
-      name,
-      email,
-      designation,
-      department,
-      salary,
-      location,
-      phone,
-      dob,
-      paidLeaves,
-      documents,
-    } = req.body;
+    const { employeeId, name, email, designation, department, salary, location, phone, dob, paidLeaves } = req.body;
+    const documents = req.files;
+    const { user } = req;
+
+    if (!employeeId || !name || !email || !designation || !department || !salary || !location) {
+      return res.status(400).json({ message: 'All required fields must be provided' });
+    }
 
     const existingEmployee = await Employee.findOne({ $or: [{ employeeId }, { email }] });
     if (existingEmployee) {
@@ -42,32 +49,52 @@ export const createEmployee = async (req, res) => {
       return res.status(400).json({ message: 'Invalid location' });
     }
 
+    const settings = await Settings.findOne();
+    const defaultPaidLeaves = settings ? settings.paidLeavesPerMonth : 2;
+
+    let uploadedDocuments = [];
+    if (documents && documents.length > 0) {
+      uploadedDocuments = await Promise.all(
+        documents.map(async (file) => {
+          const { path, filename } = await uploadFile(file);
+          return { name: filename, path, uploadedAt: new Date() };
+        })
+      );
+    }
+
     const employee = new Employee({
       employeeId,
       name,
       email,
       designation,
       department,
-      salary,
+      salary: Number(salary),
       location,
       phone,
-      dob,
-      paidLeaves: paidLeaves || { available: 3, used: 0, carriedForward: 0 },
-      documents: documents || [],
+      dob: dob ? new Date(dob) : undefined,
+      paidLeaves: paidLeaves ? JSON.parse(paidLeaves) : { available: defaultPaidLeaves, used: 0, carriedForward: 0 },
+      documents: uploadedDocuments,
+      createdBy: user._id,
     });
 
     await employee.save();
-    const newEmployee = await Employee.findById(employee._id).populate('location', 'name');
-    res.status(201).json(newEmployee);
+    const populatedEmployee = await Employee.findById(employee._id).populate('location').lean();
+
+    res.status(201).json(populatedEmployee);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to create employee' });
+    console.error('Add employee error:', error.message);
+    res.status(500).json({ message: 'Server error while adding employee' });
   }
 };
 
-export const updateEmployee = async (req, res) => {
+export const editEmployee = async (req, res) => {
   try {
     const { id } = req.params;
     const { employeeId, name, email, designation, department, salary, location, phone, dob, paidLeaves } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid employee ID' });
+    }
 
     const employee = await Employee.findById(id);
     if (!employee) {
@@ -75,24 +102,25 @@ export const updateEmployee = async (req, res) => {
     }
 
     if (employeeId && employeeId !== employee.employeeId) {
-      const existingEmployee = await Employee.findOne({ employeeId });
-      if (existingEmployee) {
+      const existingEmployeeId = await Employee.findOne({ employeeId });
+      if (existingEmployeeId) {
         return res.status(400).json({ message: 'Employee ID already exists' });
       }
       employee.employeeId = employeeId;
     }
 
     if (email && email !== employee.email) {
-      const existingEmployee = await Employee.findOne({ email });
-      if (existingEmployee) {
+      const existingEmail = await Employee.findOne({ email });
+      if (existingEmail) {
         return res.status(400).json({ message: 'Email already exists' });
       }
       employee.email = email;
     }
 
+    if (name) employee.name = name;
     if (designation) employee.designation = designation;
     if (department) employee.department = department;
-    if (salary) employee.salary = salary;
+    if (salary) employee.salary = Number(salary);
     if (location) {
       const locationExists = await Location.findById(location);
       if (!locationExists) {
@@ -100,77 +128,92 @@ export const updateEmployee = async (req, res) => {
       }
       employee.location = location;
     }
-    if (phone) employee.phone = phone;
-    if (dob) employee.dob = dob;
-    if (paidLeaves) employee.paidLeaves = {
-      ...employee.paidLeaves,
-      ...paidLeaves,
-    };
+    if (phone !== undefined) employee.phone = phone;
+    if (dob) employee.dob = new Date(dob);
+    if (paidLeaves) {
+      employee.paidLeaves = {
+        available: paidLeaves.available || employee.paidLeaves.available,
+        used: paidLeaves.used || employee.paidLeaves.used,
+        carriedForward: paidLeaves.carriedForward || employee.paidLeaves.carriedForward,
+      };
+    }
 
     await employee.save();
-    const updatedEmployee = await Employee.findById(id).populate('location', 'name');
-    res.json(updatedEmployee);
+    const populatedEmployee = await Employee.findById(id).populate('location').lean();
+
+    res.json(populatedEmployee);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to update employee' });
+    console.error('Edit employee error:', error.message);
+    res.status(500).json({ message: 'Server error while editing employee' });
   }
 };
 
 export const deleteEmployee = async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid employee ID' });
+    }
+
     const employee = await Employee.findById(id);
     if (!employee) {
       return res.status(404).json({ message: 'Employee not found' });
     }
 
-    // Delete associated documents from filesystem
-    for (const doc of employee.documents) {
-      const filePath = path.join(path.resolve(), 'uploads', path.basename(doc.path));
-      try {
-        await fs.unlink(filePath);
-      } catch (err) {
-        console.error('Failed to delete file:', err);
-      }
+    if (employee.documents && employee.documents.length > 0) {
+      await Promise.all(employee.documents.map(async (doc) => {
+        await deleteFile(doc.path);
+      }));
     }
 
     await Employee.deleteOne({ _id: id });
-    res.json({ message: 'Employee deleted successfully', id });
+
+    res.json({ message: 'Employee deleted successfully' });
   } catch (error) {
-    res.status(500).json({ message: 'Failed to delete employee' });
+    console.error('Delete employee error:', error.message);
+    res.status(500).json({ message: 'Server error while deleting employee' });
   }
 };
 
 export const uploadDocument = async (req, res) => {
   try {
     const { id } = req.params;
+    const file = req.file;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid employee ID' });
+    }
+
+    if (!file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
     const employee = await Employee.findById(id);
     if (!employee) {
       return res.status(404).json({ message: 'Employee not found' });
     }
 
-    if (!req.file) {
-      return res.status(400).json({ message: 'No file uploaded' });
-    }
-
-    const document = {
-      name: req.file.originalname,
-      path: `/uploads/${req.file.filename}`,
-      uploadedAt: new Date(),
-    };
-
-    employee.documents.push(document);
+    const { path, filename } = await uploadFile(file);
+    employee.documents.push({ name: filename, path, uploadedAt: new Date() });
     await employee.save();
 
-    const updatedEmployee = await Employee.findById(id).populate('location', 'name');
-    res.status(201).json(updatedEmployee);
+    const populatedEmployee = await Employee.findById(id).populate('location').lean();
+    res.json(populatedEmployee);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to upload document' });
+    console.error('Upload document error:', error.message);
+    res.status(500).json({ message: 'Server error while uploading document' });
   }
 };
 
 export const deleteDocument = async (req, res) => {
   try {
     const { id, documentId } = req.params;
+
+    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(documentId)) {
+      return res.status(400).json({ message: 'Invalid employee ID or document ID' });
+    }
+
     const employee = await Employee.findById(id);
     if (!employee) {
       return res.status(404).json({ message: 'Employee not found' });
@@ -181,19 +224,14 @@ export const deleteDocument = async (req, res) => {
       return res.status(404).json({ message: 'Document not found' });
     }
 
-    const filePath = path.join(path.resolve(), 'Uploads', path.basename(document.path));
-    try {
-      await fs.unlink(filePath);
-    } catch (err) {
-      console.error('Failed to delete file:', err);
-    }
-
+    await deleteFile(document.path);
     employee.documents.pull(documentId);
     await employee.save();
 
-    const updatedEmployee = await Employee.findById(id).populate('location', 'name');
-    res.json(updatedEmployee);
+    const populatedEmployee = await Employee.findById(id).populate('location').lean();
+    res.json(populatedEmployee);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to delete document' });
+    console.error('Delete document error:', error.message);
+    res.status(500).json({ message: 'Server error while deleting document' });
   }
 };

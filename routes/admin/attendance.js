@@ -1,7 +1,11 @@
 import express from 'express';
 import { getAttendance, markAttendance, editAttendance, getAttendanceRequests, handleAttendanceRequest, requestAttendanceEdit } from '../../controllers/admin/attendanceController.js';
+import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 
 const router = express.Router();
+
+router.use(protect);
+router.use(restrictTo('admin'));
 
 router.get('/attendance', getAttendance);
 router.post('/attendance', markAttendance);

@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs/promises';
+import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import siteInchargeRoutes from './routes/siteincharge/Dashboard.js';
 import siteInchargeAttendanceRoutes from './routes/siteincharge/attendance.js';
@@ -21,9 +23,19 @@ dotenv.config();
 
 const app = express();
 
+// Get __dirname equivalent in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'Uploads');
+fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
+  console.error('Failed to create uploads directory:', err.message);
+});
+
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(path.resolve(), 'Uploads')));
+app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/siteincharge', siteInchargeRoutes);

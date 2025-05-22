@@ -18,7 +18,7 @@ const attendanceRequestSchema = new mongoose.Schema(
     },
     requestedStatus: {
       type: String,
-      enum: ['present', 'absent', 'leave'],
+      enum: ['present', 'absent', 'leave', 'half-day'], // Added half-day
       required: true,
     },
     reason: {
@@ -34,7 +34,7 @@ const attendanceRequestSchema = new mongoose.Schema(
     requestedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      default: null, // No auth
+      default: null,
     },
     reviewedAt: {
       type: Date,
@@ -42,7 +42,7 @@ const attendanceRequestSchema = new mongoose.Schema(
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      default: null, // No auth
+      default: null,
     },
   },
   { timestamps: true }

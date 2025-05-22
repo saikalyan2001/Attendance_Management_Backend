@@ -8,7 +8,7 @@ const employeeSchema = new mongoose.Schema({
   department: { type: String, required: true },
   salary: { type: Number, required: true, min: 1000 },
   paidLeaves: {
-    available: { type: Number, default: 3 },
+    available: { type: Number, default: 2 }, // Aligned with Settings
     used: { type: Number, default: 0 },
     carriedForward: { type: Number, default: 0 },
   },
@@ -20,6 +20,7 @@ const employeeSchema = new mongoose.Schema({
   }],
   phone: { type: String },
   dob: { type: Date },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 
 export default mongoose.model('Employee', employeeSchema);

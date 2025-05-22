@@ -1,7 +1,11 @@
 import express from 'express';
 import { getSettings, updateSettings, updateEmployeeLeaves } from '../../controllers/admin/settingsController.js';
+import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 
 const router = express.Router();
+
+router.use(protect);
+router.use(restrictTo('admin'));
 
 router.get('/settings', getSettings);
 router.put('/settings', updateSettings);

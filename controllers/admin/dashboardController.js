@@ -18,6 +18,8 @@ export const getDashboard = async (req, res) => {
 
     const present = attendanceSummary.find((s) => s._id === 'present')?.count || 0;
     const absent = attendanceSummary.find((s) => s._id === 'absent')?.count || 0;
+    const leave = attendanceSummary.find((s) => s._id === 'leave')?.count || 0;
+    const halfDay = attendanceSummary.find((s) => s._id === 'half-day')?.count || 0;
 
     // Get recent attendance (last 5 records)
     const recentAttendance = await Attendance.find()
@@ -32,6 +34,8 @@ export const getDashboard = async (req, res) => {
       totalEmployees,
       present,
       absent,
+      leave,
+      halfDay,
       recentAttendance,
     });
   } catch (error) {
