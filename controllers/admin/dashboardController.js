@@ -8,11 +8,26 @@ export const getDashboard = async (req, res) => {
     const totalLocations = await Location.countDocuments();
     const totalEmployees = await Employee.countDocuments();
 
-    // Get today's attendance summary
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Parse the date from query, default to today
+    const { date } = req.query;
+    let targetDate = new Date();
+    if (date) {
+      targetDate = new Date(date);
+      if (isNaN(targetDate)) {
+        return res.status(400).json({ message: 'Invalid date format' });
+      }
+    }
+    targetDate.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // Get attendance summary for the specified date
     const attendanceSummary = await Attendance.aggregate([
-      { $match: { date: { $gte: today } } },
+      {
+        $match: {
+          date: { $gte: targetDate, $lte: endOfDay },
+        },
+      },
       { $group: { _id: '$status', count: { $sum: 1 } } },
     ]);
 

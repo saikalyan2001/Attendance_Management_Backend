@@ -3,7 +3,7 @@ import { uploadFile, deleteFile } from '../../utils/fileUtils.js';
 
 export const getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).populate('locations', 'name');
+    const user = await User.findById(req.user._id).populate('locations', 'name address city state');
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -41,7 +41,7 @@ export const updateProfile = async (req, res) => {
     user.phone = phone || undefined;
 
     await user.save();
-    const updatedUser = await User.findById(req.user._id).populate('locations', 'name');
+    const updatedUser = await User.findById(req.user._id).populate('locations', 'name address city state');
     res.json({
       email: updatedUser.email,
       name: updatedUser.name,
@@ -107,17 +107,47 @@ export const uploadProfilePicture = async (req, res) => {
     user.profilePicture = { name: filename, path, uploadedAt: new Date() };
     await user.save();
 
-    const updatedUser = await User.findById(req.user._id).populate('locations', 'name');
+    const updatedUser = await User.findById(req.user._id).populate('locations', 'name address city state');
     res.json({
       email: updatedUser.email,
       name: updatedUser.name,
       phone: updatedUser.phone,
       role: updatedUser.role,
       locations: updatedUser.locations,
-      profilePicture: updatedUser.profilePicture,
+      profilePicture: user.profilePicture,
     });
   } catch (error) {
     console.error('Upload profile picture error:', error.message);
     res.status(500).json({ message: 'Failed to upload profile picture' });
+  }
+};
+
+export const deleteProfilePicture = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (!user.profilePicture?.path) {
+      return res.status(400).json({ message: 'No profile picture to delete' });
+    }
+
+    await deleteFile(user.profilePicture.path);
+    user.profilePicture = undefined;
+    await user.save();
+
+    const updatedUser = await User.findById(req.user._id).populate('locations', 'name address city state');
+    res.json({
+      email: updatedUser.email,
+      name: updatedUser.name,
+      phone: updatedUser.phone,
+      role: updatedUser.role,
+      locations: updatedUser.locations,
+      profilePicture: user.profilePicture,
+    });
+  } catch (error) {
+    console.error('Delete profile picture error:', error.message);
+    res.status(500).json({ message: 'Failed to delete profile picture' });
   }
 };

@@ -1,5 +1,5 @@
-import User from '../models/User.js';
 import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
 import Location from '../models/Location.js';
 
 export const login = async (req, res) => {
@@ -21,10 +21,16 @@ export const login = async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, role: user.role, locations: user.locations.map(loc => loc._id) },
+      { id: user._id, role: user.role, locations: user.locations.map(loc => loc._id.toString()) },
       process.env.JWT_SECRET,
       { expiresIn: '1d' }
     );
+
+    console.log('Login JWT payload:', {
+      id: user._id,
+      role: user.role,
+      locations: user.locations.map(loc => loc._id.toString())
+    });
 
     res.json({
       token,
@@ -80,10 +86,16 @@ export const signup = async (req, res) => {
     const populatedUser = await User.findById(user._id).populate('locations');
 
     const token = jwt.sign(
-      { id: user._id, role: user.role, locations: user.locations },
+      { id: user._id, role: user.role, locations: user.locations.map(id => id.toString()) },
       process.env.JWT_SECRET,
       { expiresIn: '1d' }
     );
+
+    console.log('Signup JWT payload:', {
+      id: user._id,
+      role: user.role,
+      locations: user.locations.map(id => id.toString())
+    });
 
     res.status(201).json({
       token,
@@ -93,6 +105,7 @@ export const signup = async (req, res) => {
         name: populatedUser.name,
         role: populatedUser.role,
         locations: populatedUser.locations,
+        profilePicture: populatedUser.profilePicture || null,
       },
     });
   } catch (error) {
@@ -112,7 +125,7 @@ export const logout = async (req, res) => {
 
 export const getLocations = async (req, res) => {
   try {
-    const locations = await Location.find();
+    const locations = await Location.find().lean();
     res.json(locations);
   } catch (error) {
     console.error('Get locations error:', error);
@@ -132,6 +145,7 @@ export const getMe = async (req, res) => {
       name: user.name,
       role: user.role,
       locations: user.locations,
+      profilePicture: user.profilePicture || null,
     });
   } catch (error) {
     console.error('Get me error:', error);

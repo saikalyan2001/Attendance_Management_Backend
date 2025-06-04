@@ -5,7 +5,26 @@ import { startOfDay, subDays } from 'date-fns';
 
 export const getDashboardData = async (req, res) => {
   try {
-    const { location } = req.query;
+    let { location } = req.query;
+    const user = req.user;
+
+    // Debugging logs
+    console.log('req.user:', JSON.stringify(req.user, null, 2));
+    console.log('req.query.location:', req.query.location);
+
+    // Handle location as object (e.g., { _id: "..." })
+    if (typeof location === 'object' && location?._id) {
+      location = location._id;
+    }
+
+    if (!user || !user.locations || !user.locations.some(loc => loc._id.toString() === location)) {
+      return res.status(403).json({ 
+        message: `Unauthorized: Location ${location} not assigned to user ${user.email}`,
+        userLocations: user.locations?.map(loc => loc._id.toString()) || [],
+        requestedLocation: location
+      });
+    }
+
     if (!location || !mongoose.Types.ObjectId.isValid(location)) {
       return res.status(400).json({ message: 'Valid location ID is required' });
     }

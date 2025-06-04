@@ -5,6 +5,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
+import { protect, restrictTo } from './middleware/authMiddleware.js'; // Import middleware
 import authRoutes from './routes/auth.js';
 import siteInchargeRoutes from './routes/siteincharge/Dashboard.js';
 import siteInchargeAttendanceRoutes from './routes/siteincharge/attendance.js';
@@ -35,7 +36,8 @@ fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
 
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
+// Secure the /uploads route with authentication
+app.use('/uploads', protect, restrictTo('admin', 'siteincharge'), express.static(path.join(__dirname, 'Uploads')));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/siteincharge', siteInchargeRoutes);
@@ -50,6 +52,12 @@ app.use('/api/admin', reportsRoutes);
 app.use('/api/admin', attendanceRoutes);
 app.use('/api/admin', employeesRoutes);
 app.use('/api/admin', profileRoutes);
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ message: 'Something went wrong!' });
+});
 
 mongoose
   .connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })

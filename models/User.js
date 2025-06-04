@@ -9,7 +9,6 @@ const userSchema = new mongoose.Schema({
   role: { type: String, enum: ['admin', 'siteincharge'], default: 'siteincharge' },
   locations: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Location' }],
   profilePicture: {
-    name: { type: String },
     path: { type: String },
     uploadedAt: { type: Date },
   },

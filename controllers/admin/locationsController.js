@@ -25,10 +25,10 @@ export const getLocations = async (req, res) => {
 
 export const addLocation = async (req, res) => {
   try {
-    const { name, address } = req.body;
+    const { name, address, city, state } = req.body;
 
-    if (!name || !address) {
-      return res.status(400).json({ message: 'Name and address are required' });
+    if (!name || !address || !city || !state) {
+      return res.status(400).json({ message: 'Name, address, city, and state are required' });
     }
 
     const existingLocation = await Location.findOne({ name: { $regex: `^${name}$`, $options: 'i' } });
@@ -36,7 +36,7 @@ export const addLocation = async (req, res) => {
       return res.status(400).json({ message: 'Location name already exists' });
     }
 
-    const location = new Location({ name, address });
+    const location = new Location({ name, address, city, state });
     await location.save();
 
     res.status(201).json({ ...location.toObject(), employeeCount: 0 });
@@ -49,14 +49,14 @@ export const addLocation = async (req, res) => {
 export const editLocation = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, address } = req.body;
+    const { name, address, city, state } = req.body;
 
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ message: 'Invalid location ID' });
     }
 
-    if (!name || !address) {
-      return res.status(400).json({ message: 'Name and address are required' });
+    if (!name || !address || !city || !state) {
+      return res.status(400).json({ message: 'Name, address, city, and state are required' });
     }
 
     const location = await Location.findById(id);
@@ -74,6 +74,8 @@ export const editLocation = async (req, res) => {
 
     location.name = name;
     location.address = address;
+    location.city = city;
+    location.state = state;
     await location.save();
 
     const employeeCount = await Employee.countDocuments({ location: id });
