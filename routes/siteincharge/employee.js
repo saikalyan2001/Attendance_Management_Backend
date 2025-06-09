@@ -13,6 +13,7 @@ import {
   deactivateEmployee,
   rejoinEmployee,
   getEmployeeHistory,
+  updateEmployeeAdvance,
 } from '../../controllers/siteincharge/employeesController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 import multer from 'multer';
@@ -64,5 +65,6 @@ router.post('/employees/:id/documents', upload.array('documents'), uploadDocumen
 router.delete('/employees/:id', deleteEmployee);
 router.put('/employees/:id/deactivate', deactivateEmployee);
 router.put('/employees/:id/rejoin', rejoinEmployee);
+router.put('/employees/:id/advance', updateEmployeeAdvance);
 
 export default router;

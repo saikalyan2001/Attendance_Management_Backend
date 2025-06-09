@@ -10,7 +10,7 @@ const getEmployees = asyncHandler(async (req, res) => {
   const { location, status } = req.query;
   const query = {};
   if (location) query.location = location;
-  if (status) query.status = status; // Filter by status if provided
+  if (status) query.status = status;
   const employees = await Employee.find(query).populate('location').populate('createdBy');
   res.status(200).json(employees);
 });
@@ -79,6 +79,17 @@ const addEmployee = asyncHandler(async (req, res) => {
     throw new Error('Invalid bankDetails or paidLeaves format');
   }
 
+  // Validate paidLeaves
+  if (
+    !parsedPaidLeaves ||
+    typeof parsedPaidLeaves.available !== 'number' || parsedPaidLeaves.available < 0 ||
+    typeof parsedPaidLeaves.used !== 'number' || parsedPaidLeaves.used < 0 ||
+    typeof parsedPaidLeaves.carriedForward !== 'number' || parsedPaidLeaves.carriedForward < 0
+  ) {
+    res.status(400);
+    throw new Error('paidLeaves fields (available, used, carriedForward) must be non-negative numbers');
+  }
+
   if (!parsedBankDetails.accountNo || !parsedBankDetails.ifscCode || !parsedBankDetails.bankName || !parsedBankDetails.accountHolder) {
     res.status(400);
     throw new Error('All bank details fields are required');
@@ -105,6 +116,7 @@ const addEmployee = asyncHandler(async (req, res) => {
     paidLeaves: parsedPaidLeaves,
     documents,
     createdBy,
+    advance: 0,
   });
 
   try {
@@ -129,10 +141,8 @@ const addEmployee = asyncHandler(async (req, res) => {
 // @desc    Update an employee
 // @route   PUT /api/admin/employees/:id
 // @access  Private/Admin
-
 const editEmployee = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  // Destructure req.body, explicitly excluding employeeId to prevent it from being updated
   const { name, email, designation, department, salary, phone, dob, paidLeaves, location, bankDetails } = req.body;
 
   console.log('Editing employee with ID:', id);
@@ -233,7 +243,7 @@ const editEmployee = asyncHandler(async (req, res) => {
     }
   }
 
-  // Check for duplicate email (simplified, no regex)
+  // Check for duplicate email
   if (email) {
     console.log('Checking for duplicate email:', email);
     const existingEmployee = await Employee.findOne({ 
@@ -249,7 +259,7 @@ const editEmployee = asyncHandler(async (req, res) => {
   }
 
   try {
-    // Update employee fields, explicitly excluding employeeId to ensure it remains unchanged
+    // Update employee fields
     employee.name = name;
     employee.email = email;
     employee.designation = designation;
@@ -257,11 +267,9 @@ const editEmployee = asyncHandler(async (req, res) => {
     employee.salary = parsedSalary;
     employee.phone = phone || null;
     employee.dob = dob ? new Date(dob) : null;
-
     if (location) {
       employee.location = location;
     }
-
     if (paidLeaves) {
       employee.paidLeaves = {
         available: paidLeaves.available,
@@ -269,7 +277,6 @@ const editEmployee = asyncHandler(async (req, res) => {
         carriedForward: paidLeaves.carriedForward,
       };
     }
-
     if (bankDetails) {
       employee.bankDetails = {
         accountNo: bankDetails.accountNo,
@@ -305,6 +312,89 @@ const editEmployee = asyncHandler(async (req, res) => {
     } else {
       console.error('Unhandled error during employee update:', error);
       res.status(500).json({ message: 'Failed to update employee', error: error.message });
+    }
+  }
+});
+
+// @desc    Update employee advance
+// @route   PUT /api/admin/employees/:id/advance
+// @access  Private/Admin
+const updateEmployeeAdvance = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { advance } = req.body;
+
+  console.log('Updating advance for employee ID:', id, 'with advance:', advance, 'req.body:', req.body);
+
+  // Validate employee ID
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    console.error('Invalid employee ID:', id);
+    res.status(400);
+    throw new Error('Invalid employee ID');
+  }
+
+  // Fetch employee
+  const employee = await Employee.findById(id);
+  if (!employee) {
+    console.error('Employee not found for ID:', id);
+    res.status(404);
+    throw new Error('Employee not found');
+  }
+
+  // Validate advance
+  if (advance === undefined) {
+    console.error('Advance is undefined in request body:', req.body);
+    res.status(400);
+    throw new Error('Advance is required');
+  }
+  const parsedAdvance = Number(advance);
+  if (isNaN(parsedAdvance) || parsedAdvance < 0) {
+    console.error('Invalid advance amount:', advance);
+    res.status(400);
+    throw new Error('Advance must be a non-negative number');
+  }
+
+  // Validate req.user
+  if (!req.user || !req.user._id) {
+    console.error('No authenticated user found:', req.user);
+    res.status(401);
+    throw new Error('Unauthorized: No user authenticated');
+  }
+
+  // Update advance and advanceHistory
+  employee.advance = parsedAdvance;
+  employee.advanceHistory.push({
+    amount: parsedAdvance,
+    updatedBy: req.user._id,
+    updatedAt: new Date(),
+  });
+
+  try {
+    console.log('Saving employee ID:', id);
+    await employee.save();
+    console.log('Employee saved successfully');
+
+    // Populate response
+    let populatedEmployee;
+    try {
+      populatedEmployee = await Employee.findById(id)
+        .populate('location', 'name')
+        .populate('createdBy', 'name');
+    } catch (populateError) {
+      console.error('Population error:', populateError.message, populateError.stack);
+      populatedEmployee = await Employee.findById(id);
+    }
+
+    res.status(200).json(populatedEmployee);
+  } catch (error) {
+    console.error('Error updating employee advance:', error.message, error.stack);
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map(err => ({
+        field: err.path,
+        message: err.message,
+      }));
+      res.status(400).json({ message: 'Validation failed', errors });
+    } else {
+      res.status(500).json({ message: 'Failed to update advance', error: error.message });
     }
   }
 });
@@ -472,6 +562,7 @@ const getEmployeeHistory = asyncHandler(async (req, res) => {
   res.status(200).json({
     transferHistory: employee.transferHistory,
     employmentHistory: employee.employmentHistory,
+    advanceHistory: employee.advanceHistory || [],
   });
 });
 
@@ -520,7 +611,7 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
 });
 
 // @desc    Get settings
-// @route   GET /api/admin/settings
+// @route   GET /api/admin/employees/settings
 // @access  Private/Admin
 const getSettings = asyncHandler(async (req, res) => {
   try {
@@ -539,4 +630,4 @@ const getSettings = asyncHandler(async (req, res) => {
   }
 });
 
-export { getEmployees, getSettings, getEmployeeById, addEmployee, editEmployee, deactivateEmployee, transferEmployee, rejoinEmployee, getEmployeeHistory, addEmployeeDocuments };
+export { getEmployees, getSettings, getEmployeeById, addEmployee, editEmployee, updateEmployeeAdvance, deactivateEmployee, transferEmployee, rejoinEmployee, getEmployeeHistory, addEmployeeDocuments };

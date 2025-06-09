@@ -703,3 +703,49 @@ export const getEmployeeHistory = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+export const updateEmployeeAdvance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { advance } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid employee ID' });
+    }
+
+    if (advance === undefined || advance === null || isNaN(advance) || parseFloat(advance) < 0) {
+      return res.status(400).json({ message: 'Advance must be a non-negative number' });
+    }
+
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    const userLocationIds = getUserLocationIds(req.user);
+    const employeeLocationId = normalizeLocationId(employee.location);
+
+    if (!userLocationIds.includes(employeeLocationId)) {
+      return res.status(403).json({ message: 'Employee not in assigned location' });
+    }
+
+    employee.advance = parseFloat(advance);
+
+    employee.advanceHistory.push({
+      amount: parseFloat(advance),
+      updatedAt: new Date(),
+      updatedBy: req.user._id,
+    });
+
+    await employee.save();
+
+    const populatedEmployee = await Employee.findById(id)
+      .populate('location', 'name address')
+      .lean();
+    res.json(populatedEmployee);
+  } catch (error) {
+    console.error('Update employee advance error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};

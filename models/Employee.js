@@ -9,9 +9,9 @@ const employeeSchema = new mongoose.Schema({
   salary: { type: Number, required: true },
   location: { type: mongoose.Schema.Types.ObjectId, ref: 'Location', required: true },
   paidLeaves: {
-    available: { type: Number, default: 0 },
-    used: { type: Number, default: 0 },
-    carriedForward: { type: Number, default: 0 },
+    available: { type: Number, default: 0, min: 0 },
+    used: { type: Number, default: 0, min: 0 },
+    carriedForward: { type: Number, default: 0, min: 0 },
   },
   documents: [
     {
@@ -47,7 +47,14 @@ const employeeSchema = new mongoose.Schema({
       leaveBalanceAtEnd: { type: Number },
     },
   ],
-  // Add transferTimestamp field
+  advance: { type: Number, default: 0, min: 0 },
+  advanceHistory: [
+    {
+      amount: { type: Number, required: true, min: 0 },
+      updatedAt: { type: Date, default: Date.now },
+      updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    },
+  ],
   transferTimestamp: { type: Date, default: null },
 });
 
