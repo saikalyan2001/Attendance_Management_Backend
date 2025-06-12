@@ -1,12 +1,12 @@
 import mongoose from 'mongoose';
 
 const settingsSchema = new mongoose.Schema({
-  paidLeavesPerMonth: {
+  paidLeavesPerYear: {
     type: Number,
     required: true,
-    min: 1,
-    max: 30,
-    default: 2,
+    min: 4, // Minimum 12 leaves per year (1 per month)
+    max: 360, // Maximum 360 leaves per year (30 per month)
+    default: 24, // Default to 24 leaves per year (2 per month)
   },
   halfDayDeduction: {
     type: Number,

@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -266,112 +267,6 @@ export const getEmployeeAttendance = async (req, res) => {
     res.json(attendance);
   } catch (error) {
     console.error('Get employee attendance error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-};
-
-export const editEmployee = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, email, designation, department, salary, phone, dob, status, bankDetails } = req.body;
-
-    if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ message: 'Invalid employee ID' });
-    }
-
-    if (!name || !email || !designation || !department || !salary) {
-      return res.status(400).json({ message: 'All fields except phone, DOB, status, and bank details are required' });
-    }
-
-    if (isNaN(salary) || parseFloat(salary) <= 0) {
-      return res.status(400).json({ message: 'Salary must be a positive number' });
-    }
-
-    if (phone && !/^\d{10}$/.test(phone)) {
-      return res.status(400).json({ message: 'Phone number must be 10 digits' });
-    }
-
-    if (dob && isNaN(new Date(dob))) {
-      return res.status(400).json({ message: 'Invalid date of birth' });
-    }
-
-    if (status && !['active', 'inactive'].includes(status)) {
-      return res.status(400).json({ message: 'Status must be either "active" or "inactive"' });
-    }
-
-    // Validate bankDetails if provided
-    if (bankDetails) {
-      const { accountNo, ifscCode, bankName, accountHolder } = bankDetails;
-
-      // Check if all fields are provided if any bank detail is present
-      const hasAnyBankDetail = accountNo || ifscCode || bankName || accountHolder;
-      if (hasAnyBankDetail && !(accountNo && ifscCode && bankName && accountHolder)) {
-        return res.status(400).json({ message: 'All bank details fields are required if any bank detail is provided' });
-      }
-    }
-
-    const employee = await Employee.findById(id);
-    if (!employee) {
-      return res.status(404).json({ message: 'Employee not found' });
-    }
-
-    const userLocationIds = getUserLocationIds(req.user);
-    const employeeLocationId = normalizeLocationId(employee.location);
-
-    if (!userLocationIds.includes(employeeLocationId)) {
-      return res.status(403).json({ message: 'Employee not in assigned location' });
-    }
-
-    const existingEmployee = await Employee.findOne({
-      $or: [{ email }],
-      _id: { $ne: id },
-    });
-    if (existingEmployee) {
-      return res.status(400).json({ message: 'Email already exists' });
-    }
-
-    // Update fields
-    employee.name = name;
-    employee.email = email;
-    employee.designation = designation;
-    employee.department = department;
-    employee.salary = parseFloat(salary); // Ensure salary is a number
-    employee.phone = phone || null;
-    employee.dob = dob ? new Date(dob) : null;
-
-    // Update bankDetails if provided
-    if (bankDetails) {
-      employee.bankDetails = {
-        accountNo: bankDetails.accountNo,
-        ifscCode: bankDetails.ifscCode,
-        bankName: bankDetails.bankName,
-        accountHolder: bankDetails.accountHolder,
-      };
-    }
-
-    if (status) {
-      employee.status = status;
-      // Update employmentHistory
-      const currentPeriod = employee.employmentHistory[employee.employmentHistory.length - 1];
-      if (currentPeriod && !currentPeriod.endDate) {
-        currentPeriod.endDate = new Date();
-        currentPeriod.status = status;
-        currentPeriod.leaveBalanceAtEnd = employee.paidLeaves.available;
-      }
-      employee.employmentHistory.push({
-        startDate: new Date(),
-        status: status,
-      });
-    }
-
-    await employee.save();
-
-    const populatedEmployee = await Employee.findById(id)
-      .populate('location', 'name address')
-      .lean();
-    res.json(populatedEmployee);
-  } catch (error) {
-    console.error('Edit employee error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -749,3 +644,141 @@ export const updateEmployeeAdvance = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+
+export const editEmployee = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, email, designation, department, salary, phone, dob, status, bankDetails, paidLeaves } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid employee ID' });
+    }
+
+    if (!name || !email || !designation || !department || !salary) {
+      return res.status(400).json({ message: 'All fields except phone, DOB, status, bank details, and paid leaves are required' });
+    }
+
+    if (isNaN(salary) || parseFloat(salary) <= 0) {
+      return res.status(400).json({ message: 'Salary must be a positive number' });
+    }
+
+    if (phone && !/^\d{10}$/.test(phone)) {
+      return res.status(400).json({ message: 'Phone number must be 10 digits' });
+    }
+
+    if (dob && isNaN(new Date(dob))) {
+      return res.status(400).json({ message: 'Invalid date of birth' });
+    }
+
+    if (status && !['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ message: 'Status must be either "active" or "inactive"' });
+    }
+
+    // Validate bankDetails if provided
+    if (bankDetails) {
+      const { accountNo, ifscCode, bankName, accountHolder } = bankDetails;
+      const hasAnyBankDetail = accountNo || ifscCode || bankName || accountHolder;
+      if (hasAnyBankDetail && !(accountNo && ifscCode && bankName && accountHolder)) {
+        return res.status(400).json({ message: 'All bank details fields are required if any bank detail is provided' });
+      }
+    }
+
+    // Validate paidLeaves if provided
+    if (paidLeaves) {
+      const { available, used, carriedForward } = paidLeaves;
+      const hasAnyLeaveDetail = available !== undefined || used !== undefined || carriedForward !== undefined;
+      if (hasAnyLeaveDetail) {
+        if (available === undefined || used === undefined || carriedForward === undefined) {
+          return res.status(400).json({ message: 'All paid leave fields (available, used, carriedForward) are required if any is provided' });
+        }
+        if (isNaN(available) || parseFloat(available) < 0) {
+          return res.status(400).json({ message: 'Available leaves must be a non-negative number' });
+        }
+        if (isNaN(used) || parseFloat(used) < 0) {
+          return res.status(400).json({ message: 'Used leaves must be a non-negative number' });
+        }
+        if (isNaN(carriedForward) || parseFloat(carriedForward) < 0) {
+          return res.status(400).json({ message: 'Carried forward leaves must be a non-negative number' });
+        }
+        if (parseFloat(available) < parseFloat(used)) {
+          return res.status(400).json({ message: 'Available leaves cannot be less than used leaves' });
+        }
+      }
+    }
+
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    const userLocationIds = getUserLocationIds(req.user);
+    const employeeLocationId = normalizeLocationId(employee.location);
+
+    if (!userLocationIds.includes(employeeLocationId)) {
+      return res.status(403).json({ message: 'Employee not in assigned location' });
+    }
+
+    const existingEmployee = await Employee.findOne({
+      $or: [{ email }],
+      _id: { $ne: id },
+    });
+    if (existingEmployee) {
+      return res.status(400).json({ message: 'Email already exists' });
+    }
+
+    // Update fields
+    employee.name = name;
+    employee.email = email;
+    employee.designation = designation;
+    employee.department = department;
+    employee.salary = parseFloat(salary);
+    employee.phone = phone || null;
+    employee.dob = dob ? new Date(dob) : null;
+
+    // Update bankDetails if provided
+    if (bankDetails) {
+      employee.bankDetails = {
+        accountNo: bankDetails.accountNo,
+        ifscCode: bankDetails.ifscCode,
+        bankName: bankDetails.bankName,
+        accountHolder: bankDetails.accountHolder,
+      };
+    }
+
+    // Update paidLeaves if provided
+    if (paidLeaves) {
+      employee.paidLeaves = {
+        available: parseFloat(paidLeaves.available),
+        used: parseFloat(paidLeaves.used),
+        carriedForward: parseFloat(paidLeaves.carriedForward),
+      };
+    }
+
+    if (status) {
+      employee.status = status;
+      const currentPeriod = employee.employmentHistory[employee.employmentHistory.length - 1];
+      if (currentPeriod && !currentPeriod.endDate) {
+        currentPeriod.endDate = new Date();
+        currentPeriod.status = status;
+        currentPeriod.leaveBalanceAtEnd = employee.paidLeaves.available;
+      }
+      employee.employmentHistory.push({
+        startDate: new Date(),
+        status: status,
+      });
+    }
+
+    await employee.save();
+
+    const populatedEmployee = await Employee.findById(id)
+      .populate('location', 'name address')
+      .lean();
+    res.json(populatedEmployee);
+  } catch (error) {
+    console.error('Edit employee error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+

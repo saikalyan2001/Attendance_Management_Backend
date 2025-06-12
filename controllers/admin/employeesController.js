@@ -3,6 +3,20 @@ import asyncHandler from 'express-async-handler';
 import mongoose from 'mongoose';
 import Settings from '../../models/Settings.js';
 
+// Helper function to calculate prorated leaves
+const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {
+  const join = new Date(joinDate);
+  const joinYear = join.getFullYear();
+  const joinMonth = join.getMonth(); // 0-based (0 = January)
+  const currentYear = new Date().getFullYear();
+
+  if (joinYear === currentYear) {
+    const remainingMonths = 12 - joinMonth;
+    return Math.round((paidLeavesPerYear * remainingMonths) / 12);
+  }
+  return paidLeavesPerYear;
+};
+
 // @desc    Get all employees
 // @route   GET /api/admin/employees
 // @access  Private/Admin
@@ -45,13 +59,12 @@ const addEmployee = asyncHandler(async (req, res) => {
     phone,
     joinDate,
     bankDetails,
-    paidLeaves,
     createdBy,
   } = req.body;
 
   const files = req.files;
 
-  if (!employeeId || !name || !email || !designation || !department || !salary || !location || !joinDate || !bankDetails || !paidLeaves || !createdBy) {
+  if (!employeeId || !name || !email || !designation || !department || !salary || !location || !joinDate || !bankDetails || !createdBy) {
     res.status(400);
     throw new Error('All required fields must be provided');
   }
@@ -70,30 +83,35 @@ const addEmployee = asyncHandler(async (req, res) => {
     throw new Error('Invalid createdBy ID');
   }
 
-  let parsedBankDetails, parsedPaidLeaves;
+  let parsedBankDetails;
   try {
     parsedBankDetails = JSON.parse(bankDetails);
-    parsedPaidLeaves = JSON.parse(paidLeaves);
   } catch (error) {
     res.status(400);
-    throw new Error('Invalid bankDetails or paidLeaves format');
-  }
-
-  // Validate paidLeaves
-  if (
-    !parsedPaidLeaves ||
-    typeof parsedPaidLeaves.available !== 'number' || parsedPaidLeaves.available < 0 ||
-    typeof parsedPaidLeaves.used !== 'number' || parsedPaidLeaves.used < 0 ||
-    typeof parsedPaidLeaves.carriedForward !== 'number' || parsedPaidLeaves.carriedForward < 0
-  ) {
-    res.status(400);
-    throw new Error('paidLeaves fields (available, used, carriedForward) must be non-negative numbers');
+    throw new Error('Invalid bankDetails format');
   }
 
   if (!parsedBankDetails.accountNo || !parsedBankDetails.ifscCode || !parsedBankDetails.bankName || !parsedBankDetails.accountHolder) {
     res.status(400);
     throw new Error('All bank details fields are required');
   }
+
+  // Fetch settings for paidLeavesPerYear
+  const settings = await Settings.findOne();
+  if (!settings) {
+    res.status(500);
+    throw new Error('Settings not found');
+  }
+
+  // Validate and parse joinDate
+  const parsedJoinDate = new Date(joinDate);
+  if (isNaN(parsedJoinDate)) {
+    res.status(400);
+    throw new Error('Invalid join date');
+  }
+
+  // Calculate prorated leaves
+  const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
 
   const documents = files.map((file) => ({
     name: file.originalname,
@@ -111,9 +129,13 @@ const addEmployee = asyncHandler(async (req, res) => {
     salary: Number(salary),
     location,
     phone,
-    joinDate,
+    joinDate: parsedJoinDate,
     bankDetails: parsedBankDetails,
-    paidLeaves: parsedPaidLeaves,
+    paidLeaves: {
+      available: proratedLeaves,
+      used: 0,
+      carriedForward: 0,
+    },
     documents,
     createdBy,
     advance: 0,
@@ -219,6 +241,16 @@ const editEmployee = asyncHandler(async (req, res) => {
     throw new Error('Invalid location ID');
   }
 
+  // Fetch settings for paidLeavesPerYear
+  const settings = await Settings.findOne();
+  if (!settings) {
+    res.status(500);
+    throw new Error('Settings not found');
+  }
+
+  // Calculate max allowed available leaves based on proration
+  const proratedLeaves = calculateProratedLeaves(employee.joinDate, settings.paidLeavesPerYear);
+
   if (paidLeaves) {
     const { available, used, carriedForward } = paidLeaves;
     if (
@@ -230,6 +262,11 @@ const editEmployee = asyncHandler(async (req, res) => {
       console.log('Validation failed for paidLeaves:', paidLeaves);
       res.status(400);
       throw new Error('paidLeaves fields (available, used, carriedForward) must be non-negative numbers');
+    }
+    if (available > proratedLeaves) {
+      console.log(`Available leaves (${available}) exceeds prorated limit (${proratedLeaves})`);
+      res.status(400);
+      throw new Error(`Available leaves cannot exceed prorated limit of ${proratedLeaves}`);
     }
   }
 
@@ -470,14 +507,14 @@ const transferEmployee = asyncHandler(async (req, res) => {
     throw new Error('Employee is already at this location');
   }
 
-  // Add to transfer history
+  // Update transfer history
   employee.transferHistory.push({
     fromLocation: employee.location._id,
     toLocation: location,
     transferDate: parsedTransferTimestamp,
   });
 
-  // Update location and transferTimestamp
+  // Update employee
   employee.location = location;
   employee.transferTimestamp = parsedTransferTimestamp;
 
@@ -522,6 +559,16 @@ const rejoinEmployee = asyncHandler(async (req, res) => {
     throw new Error('Rejoin date must be after the last end date');
   }
 
+  // Fetch settings for paidLeavesPerYear
+  const settings = await Settings.findOne();
+  if (!settings) {
+    res.status(500);
+    throw new Error('Settings not found');
+  }
+
+  // Calculate prorated leaves for rejoin year
+  const proratedLeaves = calculateProratedLeaves(parsedRejoinDate, settings.paidLeavesPerYear);
+
   // Update status and employment history
   employee.status = 'active';
   employee.employmentHistory.push({
@@ -529,9 +576,9 @@ const rejoinEmployee = asyncHandler(async (req, res) => {
     status: 'active',
   });
 
-  // Reset leave balance
+  // Set prorated leave balance
   employee.paidLeaves = {
-    available: 0,
+    available: proratedLeaves,
     used: 0,
     carriedForward: 0,
   };
@@ -618,12 +665,12 @@ const getSettings = asyncHandler(async (req, res) => {
     let settings = await Settings.findOne();
     if (!settings) {
       settings = await Settings.create({
-        paidLeavesPerMonth: 2,
+        paidLeavesPerYear: 24,
         halfDayDeduction: 0.5,
-        highlightDuration: 24 * 60 * 60, // Default to 24 hours in seconds
+        highlightDuration: 24 * 60 * 60 * 1000, // 24 hours in milliseconds
       });
     }
-    res.json(settings);
+    res.status(200).json(settings);
   } catch (error) {
     console.error('Get settings error:', error);
     res.status(500).json({ message: 'Server error' });

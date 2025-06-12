@@ -29,10 +29,15 @@ export const getAttendance = async (req, res) => {
 
     const match = { location: new mongoose.Types.ObjectId(location) };
     if (date) {
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(date)) {
+        return res.status(400).json({ message: 'Date must be in YYYY-MM-DD format' });
+      }
       const parsedDate = new Date(date);
       if (isNaN(parsedDate)) {
         return res.status(400).json({ message: 'Invalid date format' });
       }
+      parsedDate.setHours(0, 0, 0, 0);
       match.date = parsedDate;
     }
     if (status && ['present', 'absent', 'leave', 'half-day'].includes(status)) {
@@ -52,69 +57,88 @@ export const getAttendance = async (req, res) => {
 };
 
 export const markAttendance = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
+    session.startTransaction();
     const records = Array.isArray(req.body) ? req.body : [req.body];
     console.log('markAttendance:', { user: req.user.email, records });
     const attendanceRecords = [];
-    const settings = await Settings.findOne({});
+    const settings = await Settings.findOne({}).session(session);
 
     for (const { employeeId, date, status, location } of records) {
       if (!employeeId || !date || !status || !location) {
+        await session.abortTransaction();
         return res.status(400).json({
           message: 'Employee ID, date, status, and location are required',
         });
       }
 
       if (!mongoose.isValidObjectId(employeeId) || !mongoose.isValidObjectId(location)) {
+        await session.abortTransaction();
         return res.status(400).json({ message: 'Invalid employee or location ID' });
       }
 
       if (!userHasLocation(req.user, location)) {
-        return res.status(403).json({ 
+        await session.abortTransaction();
+        return res.status(403).json({
           message: 'Location not assigned to user',
           userLocations: req.user.locations.map(loc => typeof loc === 'object' && loc._id ? loc._id.toString() : loc.toString()),
-          requestedLocation: location.toString()
+          requestedLocation: location.toString(),
         });
       }
 
-      const employee = await Employee.findById(employeeId);
+      const employee = await Employee.findById(employeeId).session(session);
       if (!employee) {
+        await session.abortTransaction();
         return res.status(404).json({ message: 'Employee not found' });
       }
       if (employee.location.toString() !== location) {
+        await session.abortTransaction();
         return res.status(403).json({
           message: 'Employee not assigned to this location',
         });
       }
 
-      const parsedDate = new Date(date);
-      if (isNaN(parsedDate)) {
-        return res.status(400).json({ message: 'Invalid date format' });
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(date)) {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Date must be in YYYY-MM-DD format' });
       }
 
+      const parsedDate = new Date(date);
+      if (isNaN(parsedDate)) {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Invalid date format' });
+      }
+      parsedDate.setHours(0, 0, 0, 0);
+
+      console.log('Checking existing attendance:', { employeeId, date: parsedDate, location });
       const existingAttendance = await Attendance.findOne({
         employee: employeeId,
         date: parsedDate,
         location,
-      });
+      }).session(session);
       if (existingAttendance) {
+        console.log('Duplicate attendance found:', existingAttendance);
+        await session.abortTransaction();
         return res.status(400).json({
           message: 'Attendance already marked for this date',
         });
       }
 
       if (status === 'leave' && employee.paidLeaves.available < 1) {
+        await session.abortTransaction();
         return res.status(400).json({ message: 'No paid leaves available' });
       }
 
       if (status === 'leave') {
         employee.paidLeaves.available -= 1;
         employee.paidLeaves.used += 1;
-        await employee.save();
+        await employee.save({ session });
       } else if (status === 'half-day' && settings?.halfDayDeduction) {
         employee.paidLeaves.available -= settings.halfDayDeduction;
         employee.paidLeaves.used += settings.halfDayDeduction;
-        await employee.save();
+        await employee.save({ session });
       }
 
       const attendance = new Attendance({
@@ -123,80 +147,110 @@ export const markAttendance = async (req, res) => {
         date: parsedDate,
         status,
       });
-      await attendance.save();
+      await attendance.save({ session });
 
       const populatedAttendance = await Attendance.findById(attendance._id)
         .populate('employee', 'name employeeId')
+        .session(session)
         .lean();
       attendanceRecords.push(populatedAttendance);
     }
 
+    await session.commitTransaction();
     res.status(201).json(attendanceRecords);
   } catch (error) {
+    await session.abortTransaction();
     console.error('Mark attendance error:', error.message);
+    if (error.code === 11000) {
+      return res.status(400).json({
+        message: 'Attendance already marked for this employee on this date',
+      });
+    }
     res.status(500).json({ message: 'Server error while marking attendance' });
+  } finally {
+    session.endSession();
   }
 };
 
 export const markBulkAttendance = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
+    session.startTransaction();
     const records = req.body;
     console.log('markBulkAttendance:', { user: req.user.email, records });
     if (!Array.isArray(records) || !records.length) {
+      await session.abortTransaction();
       return res.status(400).json({
         message: 'Array of attendance records required',
       });
     }
 
     const attendanceRecords = [];
-    const settings = await Settings.findOne({});
+    const settings = await Settings.findOne({}).session(session);
 
     for (const { employeeId, date, status, location } of records) {
       if (!employeeId || !date || !status || !location) {
+        await session.abortTransaction();
         return res.status(400).json({
           message: 'Employee ID, date, status, and location required for all records',
         });
       }
 
       if (!mongoose.isValidObjectId(employeeId) || !mongoose.isValidObjectId(location)) {
+        await session.abortTransaction();
         return res.status(400).json({ message: 'Invalid employee or location ID' });
       }
 
       if (!userHasLocation(req.user, location)) {
-        return res.status(403).json({ 
+        await session.abortTransaction();
+        return res.status(403).json({
           message: 'Location not assigned to user',
           userLocations: req.user.locations.map(loc => typeof loc === 'object' && loc._id ? loc._id.toString() : loc.toString()),
-          requestedLocation: location.toString()
+          requestedLocation: location.toString(),
         });
       }
 
-      const employee = await Employee.findById(employeeId);
+      const employee = await Employee.findById(employeeId).session(session);
       if (!employee) {
+        await session.abortTransaction();
         return res.status(404).json({ message: `Employee ${employeeId} not found` });
       }
       if (employee.location.toString() !== location) {
+        await session.abortTransaction();
         return res.status(403).json({
           message: `Employee ${employeeId} not assigned to location`,
         });
       }
 
-      const parsedDate = new Date(date);
-      if (isNaN(parsedDate)) {
-        return res.status(400).json({ message: 'Invalid date format' });
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(date)) {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Date must be in YYYY-MM-DD format' });
       }
 
+      const parsedDate = new Date(date);
+      if (isNaN(parsedDate)) {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Invalid date format' });
+      }
+      parsedDate.setHours(0, 0, 0, 0);
+
+      console.log('Checking existing attendance:', { employeeId, date: parsedDate, location });
       const existingAttendance = await Attendance.findOne({
         employee: employeeId,
         date: parsedDate,
         location,
-      });
+      }).session(session);
       if (existingAttendance) {
+        console.log('Duplicate attendance found:', existingAttendance);
+        await session.abortTransaction();
         return res.status(400).json({
           message: `Attendance already marked for employee ${employeeId} on ${date}`,
         });
       }
 
       if (status === 'leave' && employee.paidLeaves.available < 1) {
+        await session.abortTransaction();
         return res.status(400).json({
           message: `No paid leaves available for employee ${employeeId}`,
         });
@@ -205,11 +259,11 @@ export const markBulkAttendance = async (req, res) => {
       if (status === 'leave') {
         employee.paidLeaves.available -= 1;
         employee.paidLeaves.used += 1;
-        await employee.save();
+        await employee.save({ session });
       } else if (status === 'half-day' && settings?.halfDayDeduction) {
         employee.paidLeaves.available -= settings.halfDayDeduction;
         employee.paidLeaves.used += settings.halfDayDeduction;
-        await employee.save();
+        await employee.save({ session });
       }
 
       const attendance = new Attendance({
@@ -218,17 +272,27 @@ export const markBulkAttendance = async (req, res) => {
         date: parsedDate,
         status,
       });
-      await attendance.save();
+      await attendance.save({ session });
       const populatedAttendance = await Attendance.findById(attendance._id)
         .populate('employee', 'name employeeId')
+        .session(session)
         .lean();
       attendanceRecords.push(populatedAttendance);
     }
 
+    await session.commitTransaction();
     res.status(201).json({ attendance: attendanceRecords });
   } catch (error) {
+    await session.abortTransaction();
     console.error('Mark bulk attendance error:', error.message);
+    if (error.code === 11000) {
+      return res.status(400).json({
+        message: 'Attendance already marked for this employee on this date',
+      });
+    }
     res.status(500).json({ message: 'Server error while marking bulk attendance' });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -268,11 +332,15 @@ export const getMonthlyAttendance = async (req, res) => {
         return res.status(400).json({ message: 'Invalid month' });
       }
       const startDate = new Date(parsedYear, parsedMonth, 1);
+      startDate.setHours(0, 0, 0, 0);
       const endDate = new Date(parsedYear, parsedMonth + 1, 1);
+      endDate.setHours(0, 0, 0, 0);
       match.date = { $gte: startDate, $lt: endDate };
     } else {
       const startDate = new Date(parsedYear, 0, 1);
+      startDate.setHours(0, 0, 0, 0);
       const endDate = new Date(parsedYear + 1, 0, 1);
+      endDate.setHours(0, 0, 0, 0);
       match.date = { $gte: startDate, $lt: endDate };
     }
 
@@ -308,7 +376,9 @@ export const getEmployeeAttendance = async (req, res) => {
     }
 
     const startDate = new Date(parsedYear, parsedMonth, 1);
+    startDate.setHours(0, 0, 0, 0);
     const endDate = new Date(parsedYear, parsedMonth + 1, 1);
+    endDate.setHours(0, 0, 0, 0);
 
     const attendance = await Attendance.find({
       employee: new mongoose.Types.ObjectId(id),
@@ -329,53 +399,70 @@ export const getEmployeeAttendance = async (req, res) => {
 };
 
 export const requestAttendanceEdit = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
+    session.startTransaction();
     const { employeeId, location, date, requestedStatus, reason } = req.body;
     console.log('requestAttendanceEdit:', { user: req.user.email, employeeId, location, date, requestedStatus });
     if (!employeeId || !location || !date || !requestedStatus || !reason) {
+      await session.abortTransaction();
       return res.status(400).json({
         message: 'Employee ID, location, date, requested status, and reason are required',
       });
     }
 
     if (!mongoose.isValidObjectId(employeeId) || !mongoose.isValidObjectId(location)) {
+      await session.abortTransaction();
       return res.status(400).json({ message: 'Invalid employee or location ID' });
     }
 
     if (!['present', 'absent', 'leave', 'half-day'].includes(requestedStatus)) {
+      await session.abortTransaction();
       return res.status(400).json({ message: 'Invalid requested status' });
     }
 
     if (!userHasLocation(req.user, location)) {
-      return res.status(403).json({ 
+      await session.abortTransaction();
+      return res.status(403).json({
         message: 'Location not assigned to user',
         userLocations: req.user.locations.map(loc => typeof loc === 'object' && loc._id ? loc._id.toString() : loc.toString()),
-        requestedLocation: location.toString()
+        requestedLocation: location.toString(),
       });
     }
 
-    const employee = await Employee.findById(employeeId);
+    const employee = await Employee.findById(employeeId).session(session);
     if (!employee) {
+      await session.abortTransaction();
       return res.status(404).json({ message: 'Employee not found' });
     }
     if (employee.location.toString() !== location) {
+      await session.abortTransaction();
       return res.status(403).json({
         message: 'Employee not assigned to this location',
       });
     }
 
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(date)) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Date must be in YYYY-MM-DD format' });
+    }
+
     const parsedDate = new Date(date);
     if (isNaN(parsedDate)) {
+      await session.abortTransaction();
       return res.status(400).json({ message: 'Invalid date format' });
     }
+    parsedDate.setHours(0, 0, 0, 0);
 
     const existingRequest = await AttendanceRequest.findOne({
       employee: employeeId,
       location,
       date: parsedDate,
       status: 'pending',
-    });
+    }).session(session);
     if (existingRequest) {
+      await session.abortTransaction();
       return res.status(400).json({
         message: 'Pending edit request already exists for this date',
       });
@@ -390,15 +477,23 @@ export const requestAttendanceEdit = async (req, res) => {
       requestedBy: req.user._id,
       status: 'pending',
     });
-    await attendanceRequest.save();
+    await attendanceRequest.save({ session });
 
+    await session.commitTransaction();
     res.status(201).json(attendanceRequest);
   } catch (error) {
+    await session.abortTransaction();
     console.error('Request attendance edit error:', error.message);
+    if (error.code === 11000) {
+      return res.status(400).json({
+        message: 'Attendance request already exists for this employee on this date',
+      });
+    }
     res.status(500).json({ message: 'Server error while requesting attendance edit' });
+  } finally {
+    session.endSession();
   }
 };
-
 
 export const getAttendanceEditRequests = async (req, res) => {
   try {
@@ -448,4 +543,3 @@ export const getAttendanceEditRequests = async (req, res) => {
     res.status(500).json({ message: 'Server error while fetching attendance edit requests' });
   }
 };
-

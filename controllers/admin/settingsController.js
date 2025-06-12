@@ -6,7 +6,7 @@ export const getSettings = async (req, res) => {
     let settings = await Settings.findOne();
     if (!settings) {
       settings = await Settings.create({
-        paidLeavesPerMonth: 2,
+        paidLeavesPerYear: 24, // Default to 24 leaves per year
         halfDayDeduction: 0.5,
         highlightDuration: 24 * 60 * 60 * 1000, // Default to 24 hours in milliseconds
       });
@@ -20,10 +20,10 @@ export const getSettings = async (req, res) => {
 
 export const updateSettings = async (req, res) => {
   try {
-    const { paidLeavesPerMonth, halfDayDeduction, highlightDuration } = req.body;
+    const { paidLeavesPerYear, halfDayDeduction, highlightDuration } = req.body;
 
-    if (!Number.isInteger(paidLeavesPerMonth) || paidLeavesPerMonth < 1 || paidLeavesPerMonth > 30) {
-      return res.status(400).json({ message: 'Paid leaves must be an integer between 1 and 30' });
+    if (!Number.isInteger(paidLeavesPerYear) || paidLeavesPerYear < 12 || paidLeavesPerYear > 360) {
+      return res.status(400).json({ message: 'Paid leaves per year must be an integer between 12 and 360' });
     }
 
     if (isNaN(halfDayDeduction) || halfDayDeduction < 0 || halfDayDeduction > 1) {
@@ -36,7 +36,7 @@ export const updateSettings = async (req, res) => {
 
     const settings = await Settings.findOneAndUpdate(
       {},
-      { paidLeavesPerMonth, halfDayDeduction, highlightDuration },
+      { paidLeavesPerYear, halfDayDeduction, highlightDuration },
       { new: true, upsert: true }
     );
 
@@ -54,18 +54,29 @@ export const updateEmployeeLeaves = async (req, res) => {
       return res.status(404).json({ message: 'Settings not found' });
     }
 
-    const { paidLeavesPerMonth } = settings;
+    const { paidLeavesPerYear } = settings;
     const employees = await Employee.find();
+    const currentYear = new Date().getFullYear();
 
     const updatedEmployees = await Promise.all(
       employees.map(async (employee) => {
-        const newAvailable = employee.paidLeaves.available + paidLeavesPerMonth;
+        const joinDate = new Date(employee.joinDate);
+        const joinYear = joinDate.getFullYear();
+        const joinMonth = joinDate.getMonth(); // 0-based (0 = January, 2 = March, etc.)
+        
+        // Calculate remaining months in the join year
+        const remainingMonths = joinYear === currentYear ? 12 - joinMonth : 12;
+        // Prorate leaves based on remaining months
+        const proratedLeaves = Math.round((paidLeavesPerYear * remainingMonths) / 12);
+        const monthlyLeaves = paidLeavesPerYear / 12;
+        const newAvailable = Math.min(proratedLeaves, employee.paidLeaves.available + monthlyLeaves);
+
         return await Employee.findByIdAndUpdate(
           employee._id,
           {
             $set: {
-              'paidLeaves.available': Math.min(newAvailable, 30),
-              'paidLeaves.carriedForward': Math.max(0, newAvailable - 30),
+              'paidLeaves.available': Math.min(newAvailable, 30), // Cap at 30
+              'paidLeaves.carriedForward': Math.max(0, newAvailable - 30), // Carry forward excess
             },
           },
           { new: true }
