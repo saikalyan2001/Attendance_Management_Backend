@@ -147,7 +147,7 @@ export const getSalaryReport = async (req, res) => {
       .lean();
 
     const PAID_LEAVE_LIMIT = settings.paidLeavesPerMonth || 2;
-    const HALF_DAY_WEIGHT = 0.5; // Half-day counts as 0.5 days for paid leave consumption
+    const HALF_DAY_WEIGHT = 0.5; // Half-day counts as 0.5 days for absence calculation
 
     const salaryReport = employees.map((emp) => {
       const empAttendance = attendance.filter(
@@ -182,21 +182,26 @@ export const getSalaryReport = async (req, res) => {
         };
       }
 
-      const dailySalary = emp.salary / workingDays;
-      // Calculate non-working days (including unrecorded days)
-      const nonWorkingDays = absentDays + leaveDays + halfDays * HALF_DAY_WEIGHT;
-      const unrecordedDays = workingDays - totalRecordedDays;
-      const totalNonWorkingDays = nonWorkingDays + unrecordedDays;
-      const paidLeaveDays = Math.min(totalNonWorkingDays, PAID_LEAVE_LIMIT);
-      const unpaidDays = totalNonWorkingDays - paidLeaveDays;
-
       // Gross salary: Full base salary
       const grossSalary = emp.salary;
-      // Net salary: Deduct unpaid days
-      const netSalary = Math.max(grossSalary - unpaidDays * dailySalary, 0);
-      // Total salary: Deduct advance
+      // Daily salary based on working days
+      const dailySalary = grossSalary / workingDays;
+      // Calculate non-working days (absent + leave + half-days weighted)
+      const nonWorkingDays = absentDays + leaveDays + halfDays * HALF_DAY_WEIGHT;
+      // Unrecorded days are treated as non-working
+      const unrecordedDays = workingDays - totalRecordedDays;
+      const totalNonWorkingDays = nonWorkingDays + unrecordedDays;
+      // Paid leave covers up to the limit
+      const paidLeaveDays = Math.min(totalNonWorkingDays, PAID_LEAVE_LIMIT);
+      // Unpaid days are those exceeding the paid leave limit
+      const unpaidDays = totalNonWorkingDays - paidLeaveDays;
+      // Base salary after deducting unpaid days
+      const baseSalary = Math.max(grossSalary - unpaidDays * dailySalary, 0);
+      // Net salary: Base salary minus advance
       const advance = emp.advance || 0;
-      const totalSalary = Math.max(netSalary - advance, 0);
+      const netSalary = Math.max(baseSalary - advance, 0);
+      // Total salary: Same as net salary
+      const totalSalary = netSalary;
 
       return {
         employee: {

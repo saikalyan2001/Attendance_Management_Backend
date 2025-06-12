@@ -21,7 +21,7 @@ export const login = async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, role: user.role, locations: user.locations.map(loc => loc._id.toString()) },
+      { id: user._id, role: user.role, userName:user.name, locations: user.locations.map(loc => loc._id.toString()) },
       process.env.JWT_SECRET,
       { expiresIn: '1d' }
     );
