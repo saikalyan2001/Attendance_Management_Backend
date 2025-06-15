@@ -7,7 +7,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -28,7 +27,7 @@ export const getSettings = async (req, res) => {
     let settings = await Settings.findOne();
     if (!settings) {
       settings = await Settings.create({
-        paidLeavesPerMonth: 2,
+        paidLeavesPerYear: 24,
         halfDayDeduction: 0.5,
       });
     }
@@ -115,7 +114,7 @@ export const registerEmployee = async (req, res) => {
       salary: parseFloat(salary),
       location: requestedLocationId,
       paidLeaves: {
-        available: settings.paidLeavesPerMonth,
+        available: settings.paidLeavesPerYear,
         used: 0,
         carriedForward: 0,
       },
@@ -142,7 +141,7 @@ export const registerEmployee = async (req, res) => {
           name: file.originalname,
           path: filePath,
           uploadedAt: new Date(),
-          size: file.size, // Store file size in bytes
+          size: file.size,
         });
       }
     }
@@ -162,7 +161,7 @@ export const registerEmployee = async (req, res) => {
 
 export const getEmployees = async (req, res) => {
   try {
-    const { location, status } = req.query; // Added status query parameter
+    const { location, status } = req.query;
     const userLocationIds = getUserLocationIds(req.user);
     const requestedLocationId = normalizeLocationId(location);
     
@@ -174,7 +173,6 @@ export const getEmployees = async (req, res) => {
       return res.status(403).json({ message: 'Location not assigned to user' });
     }
 
-    // Build the query object
     const query = { location: requestedLocationId };
     if (status && ['active', 'inactive'].includes(status)) {
       query.status = status;
@@ -252,19 +250,19 @@ export const getEmployeeAttendance = async (req, res) => {
       return res.status(403).json({ message: 'Employee not in assigned location' });
     }
 
-    // MongoDB stores dates in UTC, so we need to query the date range for the specified month
-    const startDate = new Date(yearNum, monthNum - 1, 1); // First day of the month
-    const endDate = new Date(yearNum, monthNum, 1); // First day of the next month
+    // Use UTC to avoid timezone issues
+    const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1));
+    const endDate = new Date(Date.UTC(yearNum, monthNum, 1));
 
     const attendance = await Attendance.find({
       employee: id,
-      date: {
-        $gte: startDate,
-        $lt: endDate,
-      },
-    }).lean();
+      date: { $gte: startDate, $lt: endDate },
+      isDeleted: false, // Exclude soft-deleted records
+    })
+      .sort({ date: -1, updatedAt: -1 }) // Sort by date, then updatedAt
+      .lean();
 
-    res.json(attendance);
+    res.json({ attendance }); // Match frontend expectation
   } catch (error) {
     console.error('Get employee attendance error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -274,50 +272,41 @@ export const getEmployeeAttendance = async (req, res) => {
 export const transferEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const { location, transferTimestamp } = req.body; // Extract transferTimestamp from request body
+    const { location, transferTimestamp } = req.body;
 
-    // Validate request body
     if (!location) {
       return res.status(400).json({ message: 'Location is required' });
     }
 
-    // Validate location is a valid ObjectID
     if (!mongoose.Types.ObjectId.isValid(location)) {
       return res.status(400).json({ message: 'Invalid location ID format' });
     }
 
-    // Validate the employee exists
     const employee = await Employee.findById(id);
     if (!employee) {
       return res.status(404).json({ message: 'Employee not found' });
     }
 
-    // Validate the location exists
     const newLocation = await Location.findById(location);
     if (!newLocation) {
       return res.status(400).json({ message: 'Location does not exist' });
     }
 
-    // Check if the employee is active
     if (employee.status !== 'active') {
       return res.status(400).json({ message: 'Cannot transfer an inactive employee' });
     }
 
-    // Check if the siteincharge user has access to the employee's current location
     const siteInchargeLocations = req.user.locations.map(loc => loc._id.toString());
     if (!siteInchargeLocations.includes(employee.location.toString())) {
       return res.status(403).json({ message: 'You do not have access to this employee’s location' });
     }
 
-    // Store the current location before updating
     const previousLocation = employee.location;
 
-    // Update the employee's location and transferTimestamp
     employee.location = location;
-    employee.transferTimestamp = transferTimestamp ? new Date(transferTimestamp) : new Date(); // Use provided timestamp or current time
+    employee.transferTimestamp = transferTimestamp ? new Date(transferTimestamp) : new Date();
     employee.updatedAt = Date.now();
 
-    // Add to transferHistory
     employee.transferHistory.push({
       fromLocation: previousLocation,
       toLocation: location,
@@ -326,17 +315,6 @@ export const transferEmployee = async (req, res) => {
 
     await employee.save();
 
-    // Temporarily comment out the EmployeeHistory.create call to isolate the issue
-    /*
-    await EmployeeHistory.create({
-      employee: id,
-      action: 'transfer',
-      details: { from: employee.location, to: location },
-      performedBy: req.user._id,
-    });
-    */
-
-    // Populate the location for the response
     await employee.populate('location');
     res.status(200).json(employee);
   } catch (error) {
@@ -455,10 +433,8 @@ export const deactivateEmployee = async (req, res) => {
       return res.status(400).json({ message: 'Employee is already inactive' });
     }
 
-    // Update the employee's status
     employee.status = 'inactive';
 
-    // Update employmentHistory: close the current period and add a new one
     const currentPeriod = employee.employmentHistory[employee.employmentHistory.length - 1];
     if (currentPeriod && !currentPeriod.endDate) {
       currentPeriod.endDate = new Date();
@@ -488,12 +464,10 @@ export const rejoinEmployee = async (req, res) => {
     const { id } = req.params;
     const { rejoinDate } = req.body;
 
-    // Validate employee ID
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ message: 'Invalid employee ID' });
     }
 
-    // Validate rejoinDate
     if (!rejoinDate || isNaN(new Date(rejoinDate))) {
       return res.status(400).json({ message: 'Invalid rejoin date' });
     }
@@ -503,7 +477,6 @@ export const rejoinEmployee = async (req, res) => {
       return res.status(404).json({ message: 'Employee not found' });
     }
 
-    // Check if the employee belongs to the site incharge's location
     const userLocationIds = getUserLocationIds(req.user);
     const employeeLocationId = normalizeLocationId(employee.location);
 
@@ -511,15 +484,12 @@ export const rejoinEmployee = async (req, res) => {
       return res.status(403).json({ message: 'Employee not in assigned location' });
     }
 
-    // Check if the employee is already active
     if (employee.status === 'active') {
       return res.status(400).json({ message: 'Employee is already active' });
     }
 
-    // Update the employee's status to active
     employee.status = 'active';
 
-    // Update employmentHistory: close the current period and add a new one
     const currentPeriod = employee.employmentHistory[employee.employmentHistory.length - 1];
     if (currentPeriod && !currentPeriod.endDate) {
       currentPeriod.endDate = new Date(rejoinDate);
@@ -532,9 +502,6 @@ export const rejoinEmployee = async (req, res) => {
       status: 'active',
     });
 
-    // Optionally reset leave balances or carry forward leaves
-    // For simplicity, we'll carry forward the existing leave balance
-    // You can adjust this logic based on your requirements
     employee.paidLeaves.carriedForward = employee.paidLeaves.available;
     employee.paidLeaves.used = 0;
 
@@ -573,8 +540,8 @@ export const getEmployeeHistory = async (req, res) => {
 
     const employee = await Employee.findById(id)
       .populate('location', 'name address')
-      .populate('transferHistory.fromLocation', 'name address') // Populate fromLocation
-      .populate('transferHistory.toLocation', 'name address') // Populate toLocation
+      .populate('transferHistory.fromLocation', 'name address')
+      .populate('transferHistory.toLocation', 'name address')
       .lean();
 
     if (!employee) {
@@ -588,7 +555,6 @@ export const getEmployeeHistory = async (req, res) => {
       return res.status(403).json({ message: 'Employee not in assigned location' });
     }
 
-    // Return only the history data
     res.json({
       transferHistory: employee.transferHistory || [],
       employmentHistory: employee.employmentHistory || [],
@@ -598,7 +564,6 @@ export const getEmployeeHistory = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
-
 
 export const updateEmployeeAdvance = async (req, res) => {
   try {
@@ -645,8 +610,6 @@ export const updateEmployeeAdvance = async (req, res) => {
   }
 };
 
-
-
 export const editEmployee = async (req, res) => {
   try {
     const { id } = req.params;
@@ -676,7 +639,6 @@ export const editEmployee = async (req, res) => {
       return res.status(400).json({ message: 'Status must be either "active" or "inactive"' });
     }
 
-    // Validate bankDetails if provided
     if (bankDetails) {
       const { accountNo, ifscCode, bankName, accountHolder } = bankDetails;
       const hasAnyBankDetail = accountNo || ifscCode || bankName || accountHolder;
@@ -685,7 +647,6 @@ export const editEmployee = async (req, res) => {
       }
     }
 
-    // Validate paidLeaves if provided
     if (paidLeaves) {
       const { available, used, carriedForward } = paidLeaves;
       const hasAnyLeaveDetail = available !== undefined || used !== undefined || carriedForward !== undefined;
@@ -728,7 +689,6 @@ export const editEmployee = async (req, res) => {
       return res.status(400).json({ message: 'Email already exists' });
     }
 
-    // Update fields
     employee.name = name;
     employee.email = email;
     employee.designation = designation;
@@ -737,7 +697,6 @@ export const editEmployee = async (req, res) => {
     employee.phone = phone || null;
     employee.dob = dob ? new Date(dob) : null;
 
-    // Update bankDetails if provided
     if (bankDetails) {
       employee.bankDetails = {
         accountNo: bankDetails.accountNo,
@@ -747,7 +706,6 @@ export const editEmployee = async (req, res) => {
       };
     }
 
-    // Update paidLeaves if provided
     if (paidLeaves) {
       employee.paidLeaves = {
         available: parseFloat(paidLeaves.available),
@@ -781,4 +739,3 @@ export const editEmployee = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
-

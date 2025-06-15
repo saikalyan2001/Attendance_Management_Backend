@@ -1,9 +1,18 @@
 import mongoose from 'mongoose';
 
+const monthlyLeaveSchema = new mongoose.Schema({
+  year: { type: Number, required: true },
+  month: { type: Number, required: true, min: 1, max: 12 }, // 1 = January, 12 = December
+  allocated: { type: Number, default: 2, min: 0 }, // 2 leaves per month
+  taken: { type: Number, default: 0, min: 0 },
+  carriedForward: { type: Number, default: 0, min: 0 },
+  available: { type: Number, default: 2, min: 0 }, // carriedForward + allocated - taken
+}, { _id: false });
+
 const employeeSchema = new mongoose.Schema({
   employeeId: { type: String, required: true, unique: true },
   name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true, lowercase: true }, // Added lowercase: true
   designation: { type: String, required: true },
   department: { type: String, required: true },
   salary: { type: Number, required: true },
@@ -13,6 +22,7 @@ const employeeSchema = new mongoose.Schema({
     used: { type: Number, default: 0, min: 0 },
     carriedForward: { type: Number, default: 0, min: 0 },
   },
+  monthlyLeaves: [monthlyLeaveSchema], // New field for monthly leave records
   documents: [
     {
       name: { type: String, required: true },
@@ -58,7 +68,7 @@ const employeeSchema = new mongoose.Schema({
   transferTimestamp: { type: Date, default: null },
 });
 
-// Initialize employmentHistory for existing employees
+// Initialize employmentHistory and monthlyLeaves for new employees
 employeeSchema.pre('save', function (next) {
   if (this.isNew && !this.employmentHistory.length) {
     this.employmentHistory = [{
@@ -66,7 +76,35 @@ employeeSchema.pre('save', function (next) {
       status: 'active',
     }];
   }
+  if (this.isNew && !this.monthlyLeaves.length) {
+    const joinDate = new Date(this.joinDate);
+    const joinYear = joinDate.getFullYear();
+    const joinMonth = joinDate.getMonth() + 1; // 1-based
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1;
+    const monthlyAllocation = 24 / 12; // Default to 2 leaves/month (24 leaves/year)
+
+    // Initialize monthly leaves from join month to current month
+    this.monthlyLeaves = [];
+    for (let y = joinYear; y <= currentYear; y++) {
+      const startMonth = y === joinYear ? joinMonth : 1;
+      const endMonth = y === currentYear ? currentMonth : 12;
+      for (let m = startMonth; m <= endMonth; m++) {
+        this.monthlyLeaves.push({
+          year: y,
+          month: m,
+          allocated: monthlyAllocation,
+          taken: 0,
+          carriedForward: 0,
+          available: monthlyAllocation,
+        });
+      }
+    }
+  }
   next();
 });
+
+// Add case-insensitive index for email
+employeeSchema.index({ email: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
 
 export default mongoose.model('Employee', employeeSchema);

@@ -6,7 +6,8 @@ import {
   getMonthlyAttendance,
   getEmployeeAttendance,
   requestAttendanceEdit,
-  getAttendanceEditRequests, // Add the import for the new controller
+  getAttendanceEditRequests,
+  undoAttendance, // Add the import for the new controller
 } from '../../controllers/siteincharge/attendanceController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 
@@ -22,5 +23,6 @@ router.get('/attendance/monthly', getMonthlyAttendance);
 router.get('/attendance/employee/:id', getEmployeeAttendance);
 router.post('/attendance/request-edit', requestAttendanceEdit);
 router.get('/attendance/requests', getAttendanceEditRequests); // Add the new route
+router.delete('/attendance', undoAttendance);
 
 export default router;

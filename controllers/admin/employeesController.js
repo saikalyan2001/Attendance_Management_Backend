@@ -17,6 +17,22 @@ const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {
   return paidLeavesPerYear;
 };
 
+// @desc    Check if employee exists by employeeId or email
+// @route   GET /api/admin/employees/check
+// @access  Private/Admin
+const checkEmployeeExists = asyncHandler(async (req, res) => {
+  const { employeeId, email } = req.query;
+  const query = {};
+  if (employeeId) query.employeeId = employeeId;
+  if (email) query.email = email.toLowerCase();
+  const employee = await Employee.findOne(query);
+  if (employee) {
+    res.status(200).json({ exists: true, field: employeeId ? 'employeeId' : 'email' });
+  } else {
+    res.status(200).json({ exists: false });
+  }
+});
+
 // @desc    Get all employees
 // @route   GET /api/admin/employees
 // @access  Private/Admin
@@ -123,7 +139,7 @@ const addEmployee = asyncHandler(async (req, res) => {
   const employee = new Employee({
     employeeId,
     name,
-    email,
+    email: email.toLowerCase(), // Normalize email
     designation,
     department,
     salary: Number(salary),
@@ -141,11 +157,17 @@ const addEmployee = asyncHandler(async (req, res) => {
     advance: 0,
   });
 
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
-    const createdEmployee = await employee.save();
-    const populatedEmployee = await Employee.findById(createdEmployee._id).populate('location').populate('createdBy');
+    const createdEmployee = await employee.save({ session });
+    await session.commitTransaction();
+    const populatedEmployee = await Employee.findById(createdEmployee._id)
+      .populate('location')
+      .populate('createdBy');
     res.status(201).json(populatedEmployee);
   } catch (error) {
+    await session.abortTransaction();
     if (error.name === 'ValidationError') {
       const errors = Object.values(error.errors).map(err => ({
         field: err.path,
@@ -153,10 +175,16 @@ const addEmployee = asyncHandler(async (req, res) => {
       }));
       res.status(400).json({ message: 'Validation failed', errors });
     } else if (error.code === 11000) {
-      res.status(400).json({ message: 'Employee ID or email already exists' });
+      const field = Object.keys(error.keyValue)[0];
+      res.status(400).json({ 
+        message: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists`,
+        field
+      });
     } else {
       res.status(500).json({ message: 'Failed to create employee', error: error.message });
     }
+  } finally {
+    session.endSession();
   }
 });
 
@@ -284,7 +312,7 @@ const editEmployee = asyncHandler(async (req, res) => {
   if (email) {
     console.log('Checking for duplicate email:', email);
     const existingEmployee = await Employee.findOne({ 
-      email: email, 
+      email: email.toLowerCase(), 
       _id: { $ne: id } 
     });
     if (existingEmployee) {
@@ -298,7 +326,7 @@ const editEmployee = asyncHandler(async (req, res) => {
   try {
     // Update employee fields
     employee.name = name;
-    employee.email = email;
+    employee.email = email.toLowerCase();
     employee.designation = designation;
     employee.department = department;
     employee.salary = parsedSalary;
@@ -677,4 +705,4 @@ const getSettings = asyncHandler(async (req, res) => {
   }
 });
 
-export { getEmployees, getSettings, getEmployeeById, addEmployee, editEmployee, updateEmployeeAdvance, deactivateEmployee, transferEmployee, rejoinEmployee, getEmployeeHistory, addEmployeeDocuments };
+export { getEmployees, getSettings, getEmployeeById, addEmployee, editEmployee, updateEmployeeAdvance, deactivateEmployee, transferEmployee, rejoinEmployee, getEmployeeHistory, addEmployeeDocuments, checkEmployeeExists };
