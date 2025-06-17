@@ -1,18 +1,27 @@
+// models/Employee.js
 import mongoose from 'mongoose';
+
+const advanceSchema = new mongoose.Schema({
+  year: { type: Number, required: true },
+  month: { type: Number, required: true, min: 1, max: 12 }, // 1 = January, 12 = December
+  amount: { type: Number, required: true, min: 0 },
+  updatedAt: { type: Date, default: Date.now },
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+}, { _id: false });
 
 const monthlyLeaveSchema = new mongoose.Schema({
   year: { type: Number, required: true },
-  month: { type: Number, required: true, min: 1, max: 12 }, // 1 = January, 12 = December
-  allocated: { type: Number, default: 2, min: 0 }, // 2 leaves per month
+  month: { type: Number, required: true, min: 1, max: 12 },
+  allocated: { type: Number, default: 2, min: 0 },
   taken: { type: Number, default: 0, min: 0 },
   carriedForward: { type: Number, default: 0, min: 0 },
-  available: { type: Number, default: 2, min: 0 }, // carriedForward + allocated - taken
+  available: { type: Number, default: 2, min: 0 },
 }, { _id: false });
 
 const employeeSchema = new mongoose.Schema({
   employeeId: { type: String, required: true, unique: true },
   name: { type: String, required: true },
-  email: { type: String, required: true, unique: true, lowercase: true }, // Added lowercase: true
+  email: { type: String, required: true, unique: true, lowercase: true },
   designation: { type: String, required: true },
   department: { type: String, required: true },
   salary: { type: Number, required: true },
@@ -22,7 +31,8 @@ const employeeSchema = new mongoose.Schema({
     used: { type: Number, default: 0, min: 0 },
     carriedForward: { type: Number, default: 0, min: 0 },
   },
-  monthlyLeaves: [monthlyLeaveSchema], // New field for monthly leave records
+  monthlyLeaves: [monthlyLeaveSchema],
+  advances: [advanceSchema], // New field for monthly advances
   documents: [
     {
       name: { type: String, required: true },
@@ -57,18 +67,12 @@ const employeeSchema = new mongoose.Schema({
       leaveBalanceAtEnd: { type: Number },
     },
   ],
-  advance: { type: Number, default: 0, min: 0 },
-  advanceHistory: [
-    {
-      amount: { type: Number, required: true, min: 0 },
-      updatedAt: { type: Date, default: Date.now },
-      updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    },
-  ],
+  advance: { type: Number, default: 0, min: 0, select: false }, // Deprecate but keep for backward compatibility
+  advanceHistory: [advanceSchema], // Update advanceHistory to use same schema
   transferTimestamp: { type: Date, default: null },
 });
 
-// Initialize employmentHistory and monthlyLeaves for new employees
+// Initialize employmentHistory, monthlyLeaves, and advances for new employees
 employeeSchema.pre('save', function (next) {
   if (this.isNew && !this.employmentHistory.length) {
     this.employmentHistory = [{
@@ -82,9 +86,8 @@ employeeSchema.pre('save', function (next) {
     const joinMonth = joinDate.getMonth() + 1; // 1-based
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth() + 1;
-    const monthlyAllocation = 24 / 12; // Default to 2 leaves/month (24 leaves/year)
+    const monthlyAllocation = 24 / 12; // Default to 2 leaves/month
 
-    // Initialize monthly leaves from join month to current month
     this.monthlyLeaves = [];
     for (let y = joinYear; y <= currentYear; y++) {
       const startMonth = y === joinYear ? joinMonth : 1;
@@ -97,6 +100,28 @@ employeeSchema.pre('save', function (next) {
           taken: 0,
           carriedForward: 0,
           available: monthlyAllocation,
+        });
+      }
+    }
+  }
+  if (this.isNew && !this.advances.length) {
+    const joinDate = new Date(this.joinDate);
+    const joinYear = joinDate.getFullYear();
+    const joinMonth = joinDate.getMonth() + 1;
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1;
+
+    this.advances = [];
+    for (let y = joinYear; y <= currentYear; y++) {
+      const startMonth = y === joinYear ? joinMonth : 1;
+      const endMonth = y === currentYear ? currentMonth : 12;
+      for (let m = startMonth; m <= endMonth; m++) {
+        this.advances.push({
+          year: y,
+          month: m,
+          amount: 0,
+          updatedAt: new Date(),
+          updatedBy: this.createdBy,
         });
       }
     }

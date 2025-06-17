@@ -511,10 +511,16 @@ export const getAttendanceEditRequests = async (req, res) => {
 
     const requestsWithStatus = await Promise.all(
       requests.map(async (request) => {
+        // Normalize the date to start of day for consistent comparison
+        const normalizedDate = normalizeDate(request.date);
         const attendance = await Attendance.findOne({
           employee: request.employee._id,
           location: request.location,
-          date: request.date,
+          date: {
+            $gte: normalizedDate,
+            $lt: new Date(normalizedDate.getTime() + 24 * 60 * 60 * 1000), // Next day
+          },
+          isDeleted: false, // Explicitly filter non-deleted records
         }).lean();
         return {
           ...request,

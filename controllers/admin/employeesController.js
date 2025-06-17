@@ -3,6 +3,7 @@ import asyncHandler from 'express-async-handler';
 import mongoose from 'mongoose';
 import Settings from '../../models/Settings.js';
 
+
 // Helper function to calculate prorated leaves
 const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {
   const join = new Date(joinDate);
@@ -16,6 +17,261 @@ const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {
   }
   return paidLeavesPerYear;
 };
+
+
+// @desc    Update employee advance
+// @route   PUT /api/admin/employees/:id/advance
+// @access  Private/Admin
+const updateEmployeeAdvance = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { advance, year, month } = req.body;
+
+  console.log('Updating advance for employee ID:', id, 'with advance:', advance, 'year:', year, 'month:', month);
+
+  // Validate inputs
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    console.error('Invalid employee ID:', id);
+    res.status(400);
+    throw new Error('Invalid employee ID');
+  }
+  if (advance === undefined || year === undefined || month === undefined) {
+    console.error('Missing required fields:', { advance, year, month });
+    res.status(400);
+    throw new Error('Advance, year, and month are required');
+  }
+  const parsedAdvance = Number(advance);
+  if (isNaN(parsedAdvance) || parsedAdvance < 0) {
+    console.error('Invalid advance amount:', advance);
+    res.status(400);
+    throw new Error('Advance must be a non-negative number');
+  }
+  const parsedYear = Number(year);
+  const parsedMonth = Number(month);
+  if (isNaN(parsedYear) || isNaN(parsedMonth) || parsedMonth < 1 || parsedMonth > 12) {
+    console.error('Invalid year or month:', { year, month });
+    res.status(400);
+    throw new Error('Invalid year or month');
+  }
+  if (!req.user || !req.user._id) {
+    console.error('No authenticated user found:', req.user);
+    res.status(401);
+    throw new Error('Unauthorized: No user authenticated');
+  }
+
+  // Fetch employee
+  const employee = await Employee.findById(id);
+  if (!employee) {
+    console.error('Employee not found for ID:', id);
+    res.status(404);
+    throw new Error('Employee not found');
+  }
+
+  // Update or add advance for the specified month
+  const advanceIndex = employee.advances.findIndex(
+    (adv) => adv.year === parsedYear && adv.month === parsedMonth
+  );
+  if (advanceIndex !== -1) {
+    // Update existing advance
+    employee.advances[advanceIndex].amount = parsedAdvance;
+    employee.advances[advanceIndex].updatedAt = new Date();
+    employee.advances[advanceIndex].updatedBy = req.user._id;
+  } else {
+    // Add new advance entry
+    employee.advances.push({
+      year: parsedYear,
+      month: parsedMonth,
+      amount: parsedAdvance,
+      updatedAt: new Date(),
+      updatedBy: req.user._id,
+    });
+  }
+
+  // Update advanceHistory
+  employee.advanceHistory.push({
+    year: parsedYear,
+    month: parsedMonth,
+    amount: parsedAdvance,
+    updatedAt: new Date(),
+    updatedBy: req.user._id,
+  });
+
+  try {
+    console.log('Saving employee ID:', id);
+    await employee.save();
+    console.log('Employee saved successfully');
+
+    let populatedEmployee;
+    try {
+      populatedEmployee = await Employee.findById(id)
+        .populate('location', 'name')
+        .populate('createdBy', 'name');
+    } catch (populateError) {
+      console.error('Population error:', populateError.message);
+      populatedEmployee = await Employee.findById(id);
+    }
+
+    res.status(200).json(populatedEmployee);
+  } catch (error) {
+    console.error('Error updating employee advance:', error.message);
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map(err => ({
+        field: err.path,
+        message: err.message,
+      }));
+      res.status(400).json({ message: 'Validation failed', errors });
+    } else {
+      res.status(500).json({ message: 'Failed to update advance', error: error.message });
+    }
+  }
+});
+
+// @desc    Get salary report
+// @route   GET /api/admin/reports/salary
+// @access  Private/Admin
+export const getSalaryReport = async (req, res) => {
+  try {
+    const { startDate, endDate, location } = req.query;
+    const match = {};
+
+    let workingDays, reportYear, reportMonth;
+    if (startDate && endDate) {
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      if (isNaN(start) || isNaN(end)) {
+        return res.status(400).json({ message: 'Invalid date format' });
+      }
+      match.date = {
+        $gte: start,
+        $lte: end,
+      };
+      const year = start.getFullYear();
+      const month = start.getMonth() + 1; // 1-based
+      workingDays = getDaysInMonth(year, month);
+      reportYear = year;
+      reportMonth = month;
+    } else {
+      const now = new Date();
+      workingDays = getDaysInMonth(now.getFullYear(), now.getMonth() + 1);
+      reportYear = now.getFullYear();
+      reportMonth = now.getMonth() + 1;
+    }
+
+    if (location && !mongoose.isValidObjectId(location)) {
+      return res.status(400).json({ message: 'Invalid location ID' });
+    }
+
+    const employees = await Employee.find(location ? { location } : {})
+      .select('name employeeId salary advances location paidLeaves')
+      .populate('location', 'name')
+      .lean();
+
+    const settings = await Settings.findOne();
+    if (!settings) {
+      return res.status(404).json({ message: 'Settings not found' });
+    }
+
+    const attendance = await Attendance.find(match)
+      .populate('employee', 'name employeeId')
+      .lean();
+
+    const PAID_LEAVE_LIMIT = settings.paidLeavesPerMonth || 2;
+    const HALF_DAY_WEIGHT = 0.5;
+
+    const salaryReport = employees.map((emp) => {
+      const empAttendance = attendance.filter(
+        (att) => att.employee?._id.toString() === emp._id.toString()
+      );
+      const presentDays = empAttendance.filter((att) => att.status === 'present').length;
+      const halfDays = empAttendance.filter((att) => att.status === 'half-day').length;
+      const leaveDays = empAttendance.filter((att) => att.status === 'leave').length;
+      const absentDays = empAttendance.filter((att) => att.status === 'absent').length;
+      const totalRecordedDays = presentDays + halfDays + leaveDays + absentDays;
+
+      // Find advance for the report month
+      const advanceEntry = emp.advances.find(
+        (adv) => adv.year === reportYear && adv.month === reportMonth
+      );
+      const advance = advanceEntry ? advanceEntry.amount : 0;
+
+      // If no attendance records
+      if (totalRecordedDays === 0) {
+        return {
+          employee: {
+            _id: emp._id,
+            name: emp.name,
+            employeeId: emp.employeeId,
+          },
+          location: emp.location,
+          presentDays: 0,
+          halfDays: 0,
+          absentDays: 0,
+          unrecordedDays: workingDays,
+          leaveDays: 0,
+          grossSalary: parseFloat(emp.salary.toFixed(2)),
+          netSalary: 0.00,
+          advance: parseFloat(advance.toFixed(2)),
+          totalSalary: 0.00,
+        };
+      }
+
+      const grossSalary = emp.salary;
+      const dailySalary = grossSalary / workingDays;
+      const nonWorkingDays = absentDays + leaveDays + halfDays * HALF_DAY_WEIGHT;
+      const unrecordedDays = workingDays - totalRecordedDays;
+      const totalNonWorkingDays = nonWorkingDays + unrecordedDays;
+      const paidLeaveDays = Math.min(totalNonWorkingDays, PAID_LEAVE_LIMIT);
+      const unpaidDays = totalNonWorkingDays - paidLeaveDays;
+      const baseSalary = Math.max(grossSalary - unpaidDays * dailySalary, 0);
+      const netSalary = Math.max(baseSalary - advance, 0);
+      const totalSalary = netSalary;
+
+      return {
+        employee: {
+          _id: emp._id,
+          name: emp.name,
+          employeeId: emp.employeeId,
+        },
+        location: emp.location,
+        presentDays,
+        halfDays,
+        absentDays,
+        unrecordedDays,
+        leaveDays,
+        grossSalary: parseFloat(grossSalary.toFixed(2)),
+        netSalary: parseFloat(netSalary.toFixed(2)),
+        advance: parseFloat(advance.toFixed(2)),
+        totalSalary: parseFloat(totalSalary.toFixed(2)),
+      };
+    });
+
+    const summary = {
+      totalPresentDays: salaryReport.reduce((sum, emp) => sum + emp.presentDays, 0),
+      totalHalfDays: salaryReport.reduce((sum, emp) => sum + emp.halfDays, 0),
+      totalAbsentDays: salaryReport.reduce((sum, emp) => sum + emp.absentDays, 0),
+      totalUnrecordedDays: salaryReport.reduce((sum, emp) => sum + emp.unrecordedDays, 0),
+      totalLeaveDays: salaryReport.reduce((sum, emp) => sum + emp.leaveDays, 0),
+      totalGrossSalary: parseFloat(
+        salaryReport.reduce((sum, emp) => sum + emp.grossSalary, 0).toFixed(2)
+      ),
+      totalNetSalary: parseFloat(
+        salaryReport.reduce((sum, emp) => sum + emp.netSalary, 0).toFixed(2)
+      ),
+      totalAdvance: parseFloat(
+        salaryReport.reduce((sum, emp) => sum + emp.advance, 0).toFixed(2)
+      ),
+      totalSalary: parseFloat(
+        salaryReport.reduce((sum, emp) => sum + emp.totalSalary, 0).toFixed(2)
+      ),
+    };
+
+    res.json({ employees: salaryReport, summary });
+  } catch (error) {
+    console.error('Salary report error:', error.message);
+    res.status(500).json({ message: 'Server error while fetching salary report' });
+  }
+};
+
+
 
 // @desc    Check if employee exists by employeeId or email
 // @route   GET /api/admin/employees/check
@@ -41,9 +297,13 @@ const getEmployees = asyncHandler(async (req, res) => {
   const query = {};
   if (location) query.location = location;
   if (status) query.status = status;
-  const employees = await Employee.find(query).populate('location').populate('createdBy');
+  const employees = await Employee.find(query)
+    .select('employeeId name email designation department salary location paidLeaves advances documents phone dob joinDate bankDetails createdBy status transferHistory employmentHistory transferTimestamp') // Add 'advances'
+    .populate('location', 'name')
+    .populate('createdBy', 'name');
   res.status(200).json(employees);
 });
+
 
 // @desc    Get a single employee by ID
 // @route   GET /api/admin/employees/:id
@@ -381,88 +641,6 @@ const editEmployee = asyncHandler(async (req, res) => {
   }
 });
 
-// @desc    Update employee advance
-// @route   PUT /api/admin/employees/:id/advance
-// @access  Private/Admin
-const updateEmployeeAdvance = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { advance } = req.body;
-
-  console.log('Updating advance for employee ID:', id, 'with advance:', advance, 'req.body:', req.body);
-
-  // Validate employee ID
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    console.error('Invalid employee ID:', id);
-    res.status(400);
-    throw new Error('Invalid employee ID');
-  }
-
-  // Fetch employee
-  const employee = await Employee.findById(id);
-  if (!employee) {
-    console.error('Employee not found for ID:', id);
-    res.status(404);
-    throw new Error('Employee not found');
-  }
-
-  // Validate advance
-  if (advance === undefined) {
-    console.error('Advance is undefined in request body:', req.body);
-    res.status(400);
-    throw new Error('Advance is required');
-  }
-  const parsedAdvance = Number(advance);
-  if (isNaN(parsedAdvance) || parsedAdvance < 0) {
-    console.error('Invalid advance amount:', advance);
-    res.status(400);
-    throw new Error('Advance must be a non-negative number');
-  }
-
-  // Validate req.user
-  if (!req.user || !req.user._id) {
-    console.error('No authenticated user found:', req.user);
-    res.status(401);
-    throw new Error('Unauthorized: No user authenticated');
-  }
-
-  // Update advance and advanceHistory
-  employee.advance = parsedAdvance;
-  employee.advanceHistory.push({
-    amount: parsedAdvance,
-    updatedBy: req.user._id,
-    updatedAt: new Date(),
-  });
-
-  try {
-    console.log('Saving employee ID:', id);
-    await employee.save();
-    console.log('Employee saved successfully');
-
-    // Populate response
-    let populatedEmployee;
-    try {
-      populatedEmployee = await Employee.findById(id)
-        .populate('location', 'name')
-        .populate('createdBy', 'name');
-    } catch (populateError) {
-      console.error('Population error:', populateError.message, populateError.stack);
-      populatedEmployee = await Employee.findById(id);
-    }
-
-    res.status(200).json(populatedEmployee);
-  } catch (error) {
-    console.error('Error updating employee advance:', error.message, error.stack);
-    if (error.name === 'ValidationError') {
-      const errors = Object.values(error.errors).map(err => ({
-        field: err.path,
-        message: err.message,
-      }));
-      res.status(400).json({ message: 'Validation failed', errors });
-    } else {
-      res.status(500).json({ message: 'Failed to update advance', error: error.message });
-    }
-  }
-});
 
 // @desc    Deactivate an employee
 // @route   PUT /api/admin/employees/:id/deactivate

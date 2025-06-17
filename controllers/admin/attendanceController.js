@@ -4,6 +4,8 @@ import AttendanceRequest from "../../models/AttendanceRequest.js";
 import Employee from "../../models/Employee.js";
 import Location from "../../models/Location.js";
 import { format, parseISO, isValid } from "date-fns";
+import { startOfDay, endOfDay } from "date-fns";
+
 
 export const getAttendance = async (req, res) => {
   try {
@@ -100,8 +102,28 @@ export const getAttendanceRequests = async (req, res) => {
       .populate("location", "name")
       .lean();
 
-    console.log('getAttendanceRequests result:', requests.length, 'records');
-    res.json(requests);
+    // Fetch corresponding attendance records to include currentStatus
+    const enrichedRequests = await Promise.all(
+      requests.map(async (request) => {
+        const attendance = await Attendance.findOne({
+          employee: request.employee._id,
+          location: request.location._id,
+          date: {
+            $gte: new Date(request.date.setHours(0, 0, 0, 0)),
+            $lte: new Date(request.date.setHours(23, 59, 59, 999)),
+          },
+          isDeleted: false,
+        }).lean();
+
+        return {
+          ...request,
+          currentStatus: attendance ? attendance.status : "N/A",
+        };
+      })
+    );
+
+    console.log('getAttendanceRequests result:', enrichedRequests.length, 'records');
+    res.json(enrichedRequests);
   } catch (error) {
     console.error("Get attendance requests error:", {
       message: error.message,
@@ -110,6 +132,8 @@ export const getAttendanceRequests = async (req, res) => {
     res.status(500).json({ message: "Server error while fetching attendance requests" });
   }
 };
+
+
 
 export const handleAttendanceRequest = async (req, res) => {
   try {
@@ -130,13 +154,28 @@ export const handleAttendanceRequest = async (req, res) => {
     await request.save();
 
     if (status === "approved") {
+      const dateStart = startOfDay(new Date(request.date));
+      const dateEnd = endOfDay(new Date(request.date));
+      console.log("Searching for attendance record with:", {
+        employee: request.employee,
+        location: request.location,
+        dateRange: { $gte: dateStart, $lte: dateEnd },
+      });
       const attendance = await Attendance.findOne({
         employee: request.employee,
         location: request.location,
-        date: request.date,
+        date: { $gte: dateStart, $lte: dateEnd },
         isDeleted: { $ne: true },
       }).populate("employee");
       if (attendance) {
+        console.log("Updating attendance record:", {
+          _id: attendance._id,
+          employee: request.employee,
+          location: request.location,
+          date: attendance.date,
+          oldStatus: attendance.status,
+          newStatus: request.requestedStatus,
+        });
         const employee = attendance.employee;
         let leaveAdjustment = 0;
 
@@ -166,6 +205,13 @@ export const handleAttendanceRequest = async (req, res) => {
             await employee.save();
           }
         }
+      } else {
+        console.log("No attendance record found for:", {
+          employee: request.employee,
+          location: request.location,
+          date: request.date,
+          dateRange: { $gte: dateStart, $lte: dateEnd },
+        });
       }
     }
 
@@ -178,6 +224,7 @@ export const handleAttendanceRequest = async (req, res) => {
     res.status(500).json({ message: "Server error while handling attendance request" });
   }
 };
+
 
 export const requestAttendanceEdit = async (req, res) => {
   try {

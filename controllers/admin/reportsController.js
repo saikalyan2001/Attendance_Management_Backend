@@ -109,7 +109,7 @@ export const getSalaryReport = async (req, res) => {
     const { startDate, endDate, location } = req.query;
     const match = {};
 
-    let workingDays;
+    let workingDays, reportYear, reportMonth;
     if (startDate && endDate) {
       const start = new Date(startDate);
       const end = new Date(endDate);
@@ -121,11 +121,15 @@ export const getSalaryReport = async (req, res) => {
         $lte: end,
       };
       const year = start.getFullYear();
-      const month = start.getMonth() + 1;
+      const month = start.getMonth() + 1; // 1-based
       workingDays = getDaysInMonth(year, month);
+      reportYear = year;
+      reportMonth = month;
     } else {
       const now = new Date();
       workingDays = getDaysInMonth(now.getFullYear(), now.getMonth() + 1);
+      reportYear = now.getFullYear();
+      reportMonth = now.getMonth() + 1;
     }
 
     if (location && !mongoose.isValidObjectId(location)) {
@@ -133,7 +137,7 @@ export const getSalaryReport = async (req, res) => {
     }
 
     const employees = await Employee.find(location ? { location } : {})
-      .select('name employeeId salary advance location paidLeaves')
+      .select('name employeeId salary advances location paidLeaves') // Include 'advances'
       .populate('location', 'name')
       .lean();
 
@@ -147,7 +151,7 @@ export const getSalaryReport = async (req, res) => {
       .lean();
 
     const PAID_LEAVE_LIMIT = settings.paidLeavesPerMonth || 2;
-    const HALF_DAY_WEIGHT = 0.5; // Half-day counts as 0.5 days for absence calculation
+    const HALF_DAY_WEIGHT = 0.5;
 
     const salaryReport = employees.map((emp) => {
       const empAttendance = attendance.filter(
@@ -157,11 +161,15 @@ export const getSalaryReport = async (req, res) => {
       const halfDays = empAttendance.filter((att) => att.status === 'half-day').length;
       const leaveDays = empAttendance.filter((att) => att.status === 'leave').length;
       const absentDays = empAttendance.filter((att) => att.status === 'absent').length;
-
-      // Calculate total recorded days
       const totalRecordedDays = presentDays + halfDays + leaveDays + absentDays;
 
-      // If no attendance records, assume all days are unrecorded
+      // Find advance for the report month
+      const advanceEntry = emp.advances.find(
+        (adv) => adv.year === reportYear && adv.month === reportMonth
+      );
+      const advance = advanceEntry ? advanceEntry.amount : 0;
+
+      // If no attendance records
       if (totalRecordedDays === 0) {
         return {
           employee: {
@@ -177,30 +185,20 @@ export const getSalaryReport = async (req, res) => {
           leaveDays: 0,
           grossSalary: parseFloat(emp.salary.toFixed(2)),
           netSalary: 0.00,
-          advance: parseFloat((emp.advance || 0).toFixed(2)),
+          advance: parseFloat(advance.toFixed(2)),
           totalSalary: 0.00,
         };
       }
 
-      // Gross salary: Full base salary
       const grossSalary = emp.salary;
-      // Daily salary based on working days
       const dailySalary = grossSalary / workingDays;
-      // Calculate non-working days (absent + leave + half-days weighted)
       const nonWorkingDays = absentDays + leaveDays + halfDays * HALF_DAY_WEIGHT;
-      // Unrecorded days are treated as non-working
       const unrecordedDays = workingDays - totalRecordedDays;
       const totalNonWorkingDays = nonWorkingDays + unrecordedDays;
-      // Paid leave covers up to the limit
       const paidLeaveDays = Math.min(totalNonWorkingDays, PAID_LEAVE_LIMIT);
-      // Unpaid days are those exceeding the paid leave limit
       const unpaidDays = totalNonWorkingDays - paidLeaveDays;
-      // Base salary after deducting unpaid days
       const baseSalary = Math.max(grossSalary - unpaidDays * dailySalary, 0);
-      // Net salary: Base salary minus advance
-      const advance = emp.advance || 0;
       const netSalary = Math.max(baseSalary - advance, 0);
-      // Total salary: Same as net salary
       const totalSalary = netSalary;
 
       return {
