@@ -21,7 +21,7 @@ export const getAttendanceReports = async (req, res) => {
   try {
     const { startDate, endDate, location, department } = req.query;
 
-    console.log('getAttendanceReports:', {
+    ('getAttendanceReports:', {
       user: req.user.email,
       location,
       userLocations: req.user.locations.map(loc => loc._id.toString()),
@@ -95,7 +95,7 @@ export const getAttendanceReports = async (req, res) => {
 
     res.json({ reports, locations, departments });
   } catch (error) {
-    console.error('Get attendance reports error:', error);
+    ('Get attendance reports error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -104,7 +104,7 @@ export const getLeaveReports = async (req, res) => {
   try {
     const { startDate, endDate, location, department } = req.query;
 
-    console.log('getLeaveReports:', {
+    ('getLeaveReports:', {
       user: req.user.email,
       location,
       userLocations: req.user.locations.map(loc => loc._id.toString()),
@@ -152,7 +152,7 @@ export const getLeaveReports = async (req, res) => {
 
     res.json({ reports, locations, departments });
   } catch (error) {
-    console.error('Get leave reports error:', error);
+    ('Get leave reports error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };

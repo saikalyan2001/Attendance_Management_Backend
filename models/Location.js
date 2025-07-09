@@ -17,6 +17,10 @@ const locationSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  isDeleted: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 export default mongoose.model('Location', locationSchema);

@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 
 const advanceSchema = new mongoose.Schema({
   year: { type: Number, required: true },
-  month: { type: Number, required: true, min: 1, max: 12 }, // 1 = January, 12 = December
+  month: { type: Number, required: true, min: 1, max: 12 },
   amount: { type: Number, required: true, min: 0 },
   updatedAt: { type: Date, default: Date.now },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -32,7 +32,7 @@ const employeeSchema = new mongoose.Schema({
     carriedForward: { type: Number, default: 0, min: 0 },
   },
   monthlyLeaves: [monthlyLeaveSchema],
-  advances: [advanceSchema], // New field for monthly advances
+  advances: [advanceSchema],
   documents: [
     {
       name: { type: String, required: true },
@@ -52,6 +52,7 @@ const employeeSchema = new mongoose.Schema({
   },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   status: { type: String, enum: ['active', 'inactive'], default: 'active' },
+  isDeleted: { type: Boolean, default: false }, // Added isDeleted field
   transferHistory: [
     {
       fromLocation: { type: mongoose.Schema.Types.ObjectId, ref: 'Location' },
@@ -67,8 +68,8 @@ const employeeSchema = new mongoose.Schema({
       leaveBalanceAtEnd: { type: Number },
     },
   ],
-  advance: { type: Number, default: 0, min: 0, select: false }, // Deprecate but keep for backward compatibility
-  advanceHistory: [advanceSchema], // Update advanceHistory to use same schema
+  advance: { type: Number, default: 0, min: 0, select: false },
+  advanceHistory: [advanceSchema],
   transferTimestamp: { type: Date, default: null },
 });
 
@@ -83,10 +84,10 @@ employeeSchema.pre('save', function (next) {
   if (this.isNew && !this.monthlyLeaves.length) {
     const joinDate = new Date(this.joinDate);
     const joinYear = joinDate.getFullYear();
-    const joinMonth = joinDate.getMonth() + 1; // 1-based
+    const joinMonth = joinDate.getMonth() + 1;
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth() + 1;
-    const monthlyAllocation = 24 / 12; // Default to 2 leaves/month
+    const monthlyAllocation = 24 / 12;
 
     this.monthlyLeaves = [];
     for (let y = joinYear; y <= currentYear; y++) {

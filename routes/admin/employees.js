@@ -1,5 +1,5 @@
 import express from 'express';
-import { getEmployees, getEmployeeById, addEmployee, editEmployee, updateEmployeeAdvance, deactivateEmployee, transferEmployee, rejoinEmployee, getEmployeeHistory, addEmployeeDocuments, getSettings, checkEmployeeExists } from '../../controllers/admin/employeesController.js';
+import { getEmployees, getEmployeeById, addEmployee, editEmployee, updateEmployeeAdvance, deactivateEmployee, transferEmployee, rejoinEmployee, getEmployeeHistory, addEmployeeDocuments, getSettings, checkEmployeeExists, getEmployeeCount } from '../../controllers/admin/employeesController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 import upload from '../../utils/multer.js';
 import { getAttendance } from '../../controllers/admin/attendanceController.js';
@@ -16,6 +16,7 @@ const multerErrorHandler = (err, req, res, next) => {
 };
 
 router.get('/settings', getSettings);
+router.get('/employees/count', getEmployeeCount); 
 router.get('/employees', getEmployees);
 router.get('/employees/check', checkEmployeeExists);
 router.get('/employees/:id', getEmployeeById);

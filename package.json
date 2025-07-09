@@ -21,11 +21,15 @@
     "express-validator": "^7.2.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "luxon": "^3.6.1",
     "mongoose": "^8.15.0",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.2",
+    "node-cron": "^4.1.0",
     "nodemailer": "^7.0.3",
     "pdfkit": "^0.17.1",
+    "puppeteer": "^24.11.1",
+    "react-csv": "^2.2.2",
     "winston": "^3.17.0"
   },
   "devDependencies": {

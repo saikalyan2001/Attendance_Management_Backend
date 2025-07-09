@@ -5,7 +5,8 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
-import { protect, restrictTo } from './middleware/authMiddleware.js'; // Import middleware
+import seedAdmin from './seedAdmin.js';
+import { protect, restrictTo } from './middleware/authMiddleware.js';
 import authRoutes from './routes/auth.js';
 import siteInchargeRoutes from './routes/siteincharge/Dashboard.js';
 import siteInchargeAttendanceRoutes from './routes/siteincharge/attendance.js';
@@ -34,11 +35,23 @@ fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
   console.error('Failed to create uploads directory:', err.message);
 });
 
+// Middleware
 app.use(cors());
 app.use(express.json());
-// Secure the /uploads route with authentication
-app.use('/uploads', protect, restrictTo('admin', 'siteincharge'), express.static(path.join(__dirname, 'Uploads')));
+app.use('/uploads', protect, restrictTo('admin', 'siteincharge'), (req, res, next) => {
+  // Decode URL to handle %20 and other encoded characters
+  const decodedPath = decodeURIComponent(req.path);
+  const filePath = path.join(__dirname, 'Uploads', decodedPath);
+  console.log('Attempting to serve file:', filePath);
+  fs.access(filePath)
+    .then(() => express.static(path.join(__dirname, 'Uploads'))(req, res, next))
+    .catch((err) => {
+      console.error('File access error:', err.message, 'Path:', filePath);
+      res.status(404).json({ message: 'File not found' });
+    });
+});
 
+// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/siteincharge', siteInchargeRoutes);
 app.use('/api/siteincharge', siteInchargeAttendanceRoutes);
@@ -59,10 +72,21 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Something went wrong!' });
 });
 
-mongoose
-  .connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+// Start server and seed admin
+const startServer = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    console.log('MongoDB connected');
+    await seedAdmin();
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  } catch (err) {
+    console.error('Failed to start server:', err.message);
+    process.exit(1);
+  }
+};
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+startServer();

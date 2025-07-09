@@ -18,7 +18,7 @@ export const getLocations = async (req, res) => {
     );
     res.json(locationsWithCount);
   } catch (error) {
-    console.error('Get locations error:', error.message);
+    ('Get locations error:', error.message);
     res.status(500).json({ message: 'Server error while fetching locations' });
   }
 };
@@ -41,7 +41,7 @@ export const addLocation = async (req, res) => {
 
     res.status(201).json({ ...location.toObject(), employeeCount: 0 });
   } catch (error) {
-    console.error('Add location error:', error.message);
+    ('Add location error:', error.message);
     res.status(500).json({ message: 'Server error while adding location' });
   }
 };
@@ -81,7 +81,7 @@ export const editLocation = async (req, res) => {
     const employeeCount = await Employee.countDocuments({ location: id });
     res.json({ ...location.toObject(), employeeCount });
   } catch (error) {
-    console.error('Edit location error:', error.message);
+    ('Edit location error:', error.message);
     res.status(500).json({ message: 'Server error while editing location' });
   }
 };
@@ -108,7 +108,7 @@ export const deleteLocation = async (req, res) => {
 
     res.json({ message: 'Location deleted successfully' });
   } catch (error) {
-    console.error('Delete location error:', error.message);
+    ('Delete location error:', error.message);
     res.status(500).json({ message: 'Server error while deleting location' });
   }
 };

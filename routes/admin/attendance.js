@@ -12,7 +12,7 @@ import {
   undoMarkAttendance,
 } from '../../controllers/admin/attendanceController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
-
+("route");
 const router = express.Router();
 
 router.use(protect);

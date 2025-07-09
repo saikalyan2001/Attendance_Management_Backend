@@ -48,7 +48,7 @@ export const createSiteIncharge = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Create siteincharge error:', { error, body: req.body });
+    ('Create siteincharge error:', { error, body: req.body });
     res.status(500).json({ message: 'Server error' });
   }
 };

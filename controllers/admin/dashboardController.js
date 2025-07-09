@@ -1,15 +1,13 @@
 import Employee from '../../models/Employee.js';
-import Location from '../../models/Location.js';
 import Attendance from '../../models/Attendance.js';
+import Location from '../../models/Location.js';
 
 export const getDashboard = async (req, res) => {
   try {
-    // Get counts
-    const totalLocations = await Location.countDocuments();
-    const totalEmployees = await Employee.countDocuments();
-
-    // Parse the date from query, default to today
     const { date } = req.query;
+    ('getDashboard: Requested date:', date); // Debug
+
+    // Parse the date, default to today
     let targetDate = new Date();
     if (date) {
       targetDate = new Date(date);
@@ -17,44 +15,66 @@ export const getDashboard = async (req, res) => {
         return res.status(400).json({ message: 'Invalid date format' });
       }
     }
-    targetDate.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Format date as YYYY-MM-DD for string comparison
+    const dateString = targetDate.toISOString().split('T')[0];
+    ('getDashboard: Querying attendance for date string:', dateString); // Debug
 
-    // Get attendance summary for the specified date
-    const attendanceSummary = await Attendance.aggregate([
+    // Total locations
+    const totalLocations = await Location.countDocuments({ isDeleted: false });
+    ('getDashboard: Total locations:', totalLocations); // Debug
+
+    // Total employees
+    const totalEmployees = await Employee.countDocuments({ isDeleted: false });
+
+    // Today's attendance
+    const todayAttendance = await Attendance.aggregate([
       {
         $match: {
-          date: { $gte: targetDate, $lte: endOfDay },
+          isDeleted: false,
+          date: { $regex: `^${dateString}`, $options: 'i' }, // Match YYYY-MM-DD part of ISO string
         },
       },
-      { $group: { _id: '$status', count: { $sum: 1 } } },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 },
+        },
+      },
     ]);
 
-    const present = attendanceSummary.find((s) => s._id === 'present')?.count || 0;
-    const absent = attendanceSummary.find((s) => s._id === 'absent')?.count || 0;
-    const leave = attendanceSummary.find((s) => s._id === 'leave')?.count || 0;
-    const halfDay = attendanceSummary.find((s) => s._id === 'half-day')?.count || 0;
+    ('getDashboard: Attendance summary:', todayAttendance); // Debug
 
-    // Get recent attendance (last 5 records)
-    const recentAttendance = await Attendance.find()
+    const attendanceSummary = {
+      present: todayAttendance.find((item) => item._id === 'present')?.count || 0,
+      absent: todayAttendance.find((item) => item._id === 'absent')?.count || 0,
+      leave: todayAttendance.find((item) => item._id === 'leave')?.count || 0,
+      halfDay: todayAttendance.find((item) => item._id === 'half-day')?.count || 0,
+    };
+
+    // Recent attendance (last 10 records)
+    const recentAttendance = await Attendance.find({
+      isDeleted: false,
+      date: { $regex: `^${dateString}`, $options: 'i' }, // Match YYYY-MM-DD part
+    })
       .populate('employee', 'name employeeId')
       .populate('location', 'name')
       .sort({ date: -1 })
-      .limit(5)
+      .limit(10)
       .lean();
+
+    ('getDashboard: recentAttendance for', dateString, ':', recentAttendance); // Debug
 
     res.json({
       totalLocations,
       totalEmployees,
-      present,
-      absent,
-      leave,
-      halfDay,
+      present: attendanceSummary.present,
+      absent: attendanceSummary.absent,
+      leave: attendanceSummary.leave,
+      halfDay: attendanceSummary.halfDay,
       recentAttendance,
     });
   } catch (error) {
-    console.error('Dashboard error:', error);
-    res.status(500).json({ message: 'Server error' });
+    ('getDashboard: Error:', error.message);
+    res.status(500).json({ message: 'Server error while fetching dashboard data' });
   }
 };

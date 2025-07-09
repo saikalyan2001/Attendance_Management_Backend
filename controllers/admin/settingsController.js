@@ -1,24 +1,26 @@
 import Settings from '../../models/Settings.js';
 import Employee from '../../models/Employee.js';
+import asyncHandler from 'express-async-handler';
+import Attendance from '../../models/Attendance.js';
 
-export const getSettings = async (req, res) => {
+export const getSettings = asyncHandler(async (req, res) => {
   try {
     let settings = await Settings.findOne();
     if (!settings) {
       settings = await Settings.create({
-        paidLeavesPerYear: 24, // Default to 24 leaves per year
+        paidLeavesPerYear: 24,
         halfDayDeduction: 0.5,
-        highlightDuration: 24 * 60 * 60 * 1000, // Default to 24 hours in milliseconds
+        highlightDuration: 24 * 60 * 60 * 1000,
       });
     }
-    res.json(settings);
+    res.status(200).json(settings);
   } catch (error) {
-    console.error('Get settings error:', error);
+    ('Get settings error:', error);
     res.status(500).json({ message: 'Server error' });
   }
-};
+});
 
-export const updateSettings = async (req, res) => {
+export const updateSettings = asyncHandler(async (req, res) => {
   try {
     const { paidLeavesPerYear, halfDayDeduction, highlightDuration } = req.body;
 
@@ -42,12 +44,12 @@ export const updateSettings = async (req, res) => {
 
     res.json(settings);
   } catch (error) {
-    console.error('Update settings error:', error);
+    ('Update settings error:', error);
     res.status(500).json({ message: 'Server error' });
   }
-};
+});
 
-export const updateEmployeeLeaves = async (req, res) => {
+export const updateEmployeeLeaves = asyncHandler(async (req, res) => {
   try {
     const settings = await Settings.findOne();
     if (!settings) {
@@ -55,41 +57,76 @@ export const updateEmployeeLeaves = async (req, res) => {
     }
 
     const { paidLeavesPerYear } = settings;
+    const monthlyAllocation = paidLeavesPerYear / 12;
     const employees = await Employee.find();
     const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1;
 
     const updatedEmployees = await Promise.all(
       employees.map(async (employee) => {
         const joinDate = new Date(employee.joinDate);
         const joinYear = joinDate.getFullYear();
-        const joinMonth = joinDate.getMonth(); // 0-based (0 = January, 2 = March, etc.)
-        
-        // Calculate remaining months in the join year
-        const remainingMonths = joinYear === currentYear ? 12 - joinMonth : 12;
-        // Prorate leaves based on remaining months
-        const proratedLeaves = Math.round((paidLeavesPerYear * remainingMonths) / 12);
-        const monthlyLeaves = paidLeavesPerYear / 12;
-        const newAvailable = Math.min(proratedLeaves, employee.paidLeaves.available + monthlyLeaves);
+        const joinMonth = joinDate.getMonth() + 1;
 
-        return await Employee.findByIdAndUpdate(
-          employee._id,
-          {
-            $set: {
-              'paidLeaves.available': Math.min(newAvailable, 30), // Cap at 30
-              'paidLeaves.carriedForward': Math.max(0, newAvailable - 30), // Carry forward excess
-            },
-          },
-          { new: true }
-        );
+        let previousClosingLeaves = 0;
+        let totalLeaves = 0;
+        const newMonthlyLeaves = [];
+
+        for (let y = joinYear; y <= currentYear; y++) {
+          const startMonth = y === joinYear ? joinMonth : 1;
+          const endMonth = y === currentYear ? currentMonth : 12;
+
+          for (let m = startMonth; m <= endMonth; m++) {
+            // Calculate taken leaves from attendance records
+            const startDate = new Date(y, m - 1, 1).toISOString().split('T')[0];
+            const endDate = new Date(y, m, 1).toISOString().split('T')[0];
+            const attendanceRecords = await Attendance.find({
+              employee: employee._id,
+              date: { $gte: `${startDate}T00:00:00+05:30`, $lt: `${endDate}T00:00:00+05:30` },
+              status: { $in: ['leave', 'half-day'] },
+              isDeleted: false,
+            }).lean();
+
+            const taken = attendanceRecords.reduce((sum, record) => {
+              return sum + (record.status === 'leave' ? 1 : settings.halfDayDeduction || 0.5);
+            }, 0);
+
+            const daysInMonth = new Date(y, m, 0).getDate();
+            const joinDay = y === joinYear && m === joinMonth ? joinDate.getDate() : 1;
+            const prorationFactor = (daysInMonth - joinDay + 1) / daysInMonth;
+            const allocatedLeaves = Math.round(monthlyAllocation * prorationFactor * 10) / 10;
+
+            const openingLeaves = allocatedLeaves + previousClosingLeaves;
+            const closingLeaves = Math.max(0, openingLeaves - taken);
+            newMonthlyLeaves.push({
+              year: y,
+              month: m,
+              allocated: allocatedLeaves,
+              taken,
+              carriedForward: previousClosingLeaves,
+              openingLeaves,
+              closingLeaves,
+              available: closingLeaves,
+            });
+            totalLeaves += allocatedLeaves;
+            previousClosingLeaves = closingLeaves;
+          }
+        }
+
+        employee.monthlyLeaves = newMonthlyLeaves;
+        employee.paidLeaves.available = Math.max(0, totalLeaves - employee.paidLeaves.used);
+        employee.paidLeaves.carriedForward = 0;
+        await employee.save();
+        return employee;
       })
     );
 
-    res.json({ 
-      message: 'Employee leaves updated successfully', 
-      employeeCount: updatedEmployees.length 
+    res.json({
+      message: 'Employee leaves updated successfully',
+      employeeCount: updatedEmployees.length,
     });
   } catch (error) {
-    console.error('Update employee leaves error:', error);
+    ('Update employee leaves error:', error);
     res.status(500).json({ message: 'Server error' });
   }
-};
+});

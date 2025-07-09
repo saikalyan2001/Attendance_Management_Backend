@@ -16,7 +16,7 @@ export const getProfile = async (req, res) => {
       profilePicture: user.profilePicture,
     });
   } catch (error) {
-    console.error('Get profile error:', error.message);
+    ('Get profile error:', error.message);
     res.status(500).json({ message: 'Failed to fetch profile' });
   }
 };
@@ -51,7 +51,7 @@ export const updateProfile = async (req, res) => {
       profilePicture: updatedUser.profilePicture,
     });
   } catch (error) {
-    console.error('Update profile error:', error.message);
+    ('Update profile error:', error.message);
     res.status(500).json({ message: 'Failed to update profile' });
   }
 };
@@ -81,7 +81,7 @@ export const updatePassword = async (req, res) => {
     await user.save();
     res.json({ message: 'Password updated successfully' });
   } catch (error) {
-    console.error('Update password error:', error.message);
+    ('Update password error:', error.message);
     res.status(500).json({ message: 'Failed to update password' });
   }
 };
@@ -117,7 +117,7 @@ export const uploadProfilePicture = async (req, res) => {
       profilePicture: user.profilePicture,
     });
   } catch (error) {
-    console.error('Upload profile picture error:', error.message);
+    ('Upload profile picture error:', error.message);
     res.status(500).json({ message: 'Failed to upload profile picture' });
   }
 };
@@ -147,7 +147,7 @@ export const deleteProfilePicture = async (req, res) => {
       profilePicture: user.profilePicture,
     });
   } catch (error) {
-    console.error('Delete profile picture error:', error.message);
+    ('Delete profile picture error:', error.message);
     res.status(500).json({ message: 'Failed to delete profile picture' });
   }
 };

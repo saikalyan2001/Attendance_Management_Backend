@@ -1,18 +1,17 @@
 import Employee from '../../models/Employee.js';
 import Attendance from '../../models/Attendance.js';
 import mongoose from 'mongoose';
-import { startOfDay, subDays } from 'date-fns';
 
 export const getDashboardData = async (req, res) => {
   try {
-    let { location } = req.query;
+    let { location, date } = req.query;
     const user = req.user;
 
     // Debugging logs
-    console.log('req.user:', JSON.stringify(req.user, null, 2));
-    console.log('req.query.location:', req.query.location);
+    ('req.user:', JSON.stringify(req.user, null, 2));
+    ('req.query.location:', location, 'req.query.date:', date);
 
-    // Handle location as object (e.g., { _id: "..." })
+    // Handle location as object
     if (typeof location === 'object' && location?._id) {
       location = location._id;
     }
@@ -29,18 +28,31 @@ export const getDashboardData = async (req, res) => {
       return res.status(400).json({ message: 'Valid location ID is required' });
     }
 
-    const today = startOfDay(new Date());
+    // Parse the date, default to today
+    let targetDate = new Date();
+    if (date) {
+      targetDate = new Date(date);
+      if (isNaN(targetDate)) {
+        return res.status(400).json({ message: 'Invalid date format' });
+      }
+    }
+    // Format date as YYYY-MM-DD for string comparison
+    const dateString = targetDate.toISOString().split('T')[0];
+    ('getDashboard: Querying attendance for date string:', dateString); // Debug
+
     const locationId = new mongoose.Types.ObjectId(location);
 
     // Total employees
-    const totalEmployees = await Employee.countDocuments({ location: locationId });
+    const totalEmployees = await Employee.countDocuments({ location: locationId, isDeleted: false });
+    ('getDashboard: Total employees:', totalEmployees); // Debug
 
     // Today's attendance
     const todayAttendance = await Attendance.aggregate([
       {
         $match: {
           location: locationId,
-          date: { $gte: today, $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000) },
+          isDeleted: false,
+          date: { $regex: `^${dateString}`, $options: 'i' }, // Match YYYY-MM-DD part
         },
       },
       {
@@ -51,78 +63,39 @@ export const getDashboardData = async (req, res) => {
       },
     ]);
 
+    ('getDashboard: Attendance summary:', todayAttendance); // Debug
+
     const attendanceSummary = {
       present: todayAttendance.find((item) => item._id === 'present')?.count || 0,
       absent: todayAttendance.find((item) => item._id === 'absent')?.count || 0,
       leave: todayAttendance.find((item) => item._id === 'leave')?.count || 0,
+      halfDay: todayAttendance.find((item) => item._id === 'half-day')?.count || 0,
     };
 
-    // Recent attendance (last 5 records)
-    const recentAttendance = await Attendance.find({ location: locationId })
+    // Recent attendance (last 10 records)
+    const recentAttendance = await Attendance.find({
+      location: locationId,
+      isDeleted: false,
+      date: { $regex: `^${dateString}`, $options: 'i' }, // Match YYYY-MM-DD part
+    })
       .populate('employee', 'name employeeId')
       .sort({ date: -1 })
-      .limit(5)
+      .limit(10)
       .lean();
 
-    // Leave usage summary
-    const leaveSummary = await Employee.aggregate([
-      { $match: { location: locationId } },
-      {
-        $group: {
-          _id: null,
-          totalLeaves: { $sum: '$paidLeaves.used' },
-          totalEmployees: { $sum: 1 },
-        },
-      },
-      {
-        $project: {
-          totalLeaves: 1,
-          averageLeaves: { $cond: [{ $eq: ['$totalEmployees', 0] }, 0, { $divide: ['$totalLeaves', '$totalEmployees'] }] },
-          _id: 0,
-        },
-      },
-    ]);
+    ('getDashboard: recentAttendance for', dateString, ':', recentAttendance); // Debug
 
-    // Attendance trends (last 7 days)
-    const sevenDaysAgo = subDays(today, 7);
-    const attendanceTrends = await Attendance.aggregate([
-      {
-        $match: {
-          location: locationId,
-          date: { $gte: sevenDaysAgo, $lte: today },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$date' },
-          },
-          present: { $sum: { $cond: [{ $eq: ['$status', 'present'] }, 1, 0] } },
-          absent: { $sum: { $cond: [{ $eq: ['$status', 'absent'] }, 1, 0] } },
-        },
-      },
-      {
-        $sort: { _id: 1 },
-      },
-      {
-        $project: {
-          date: '$_id',
-          present: 1,
-          absent: 1,
-          _id: 0,
-        },
-      },
-    ]);
-
-    res.json({
+    // Prepare response
+    const response = {
       totalEmployees,
       todayAttendance: attendanceSummary,
       recentAttendance,
-      leaveSummary: leaveSummary[0] || { totalLeaves: 0, averageLeaves: 0 },
-      attendanceTrends,
-    });
+    };
+
+    ('getDashboard: Sending response:', response); // Debug
+    res.json(response);
   } catch (error) {
-    console.error('Dashboard error:', error.message);
+    ('Dashboard error:', error.message);
     res.status(500).json({ message: 'Server error while fetching dashboard data' });
   }
 };
