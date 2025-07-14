@@ -34,7 +34,17 @@ fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
   console.error('Failed to create uploads directory:', err.message);
 });
 
-app.use(cors());
+// app.use(cors());
+app.use(cors({
+  origin: 'https://chimerical-dolphin-5e57bb.netlify.app',
+  credentials: true,
+}));
+
+app.options('*', cors({
+  origin: 'https://chimerical-dolphin-5e57bb.netlify.app',
+  credentials: true,
+}));
+
 app.use(express.json());
 // Secure the /uploads route with authentication
 app.use('/uploads', protect, restrictTo('admin', 'siteincharge'), express.static(path.join(__dirname, 'Uploads')));
