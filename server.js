@@ -30,7 +30,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'Uploads');
+const uploadsDir = path.join(__dirname, 'Uploads', 'documents');
 fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
   console.error('Failed to create uploads directory:', err.message);
 });
@@ -38,17 +38,17 @@ fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', protect, restrictTo('admin', 'siteincharge'), (req, res, next) => {
-  // Decode URL to handle %20 and other encoded characters
+app.use('/uploads', protect, restrictTo('admin', 'siteincharge'), async (req, res, next) => {
   const decodedPath = decodeURIComponent(req.path);
-  const filePath = path.join(__dirname, 'Uploads', decodedPath);
+  const filePath = path.join(__dirname, 'Uploads', 'documents', decodedPath.replace('/documents/', ''));
   console.log('Attempting to serve file:', filePath);
-  fs.access(filePath)
-    .then(() => express.static(path.join(__dirname, 'Uploads'))(req, res, next))
-    .catch((err) => {
-      console.error('File access error:', err.message, 'Path:', filePath);
-      res.status(404).json({ message: 'File not found' });
-    });
+  try {
+    await fs.access(filePath);
+    express.static(uploadsDir)(req, res, next);
+  } catch (err) {
+    console.error('File access error:', err.message, 'Path:', filePath);
+    res.status(404).json({ message: 'File not found' });
+  }
 });
 
 // Routes
@@ -68,7 +68,7 @@ app.use('/api/admin', profileRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('Server error:', err.stack);
   res.status(500).json({ message: 'Something went wrong!' });
 });
 
@@ -82,7 +82,7 @@ const startServer = async () => {
     console.log('MongoDB connected');
     await seedAdmin();
     const PORT = process.env.PORT || 5000;
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+    app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
   } catch (err) {
     console.error('Failed to start server:', err.message);
     process.exit(1);

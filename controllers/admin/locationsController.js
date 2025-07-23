@@ -12,13 +12,16 @@ export const getLocations = async (req, res) => {
     const locations = await Location.find(query).lean();
     const locationsWithCount = await Promise.all(
       locations.map(async (loc) => {
-        const employeeCount = await Employee.countDocuments({ location: loc._id });
+        const employeeCount = await Employee.countDocuments({ 
+          location: loc._id,
+          isDeleted: false // Only count non-deleted employees
+        });
         return { ...loc, employeeCount };
       })
     );
     res.json(locationsWithCount);
   } catch (error) {
-    ('Get locations error:', error.message);
+    console.error('Get locations error:', error.message);
     res.status(500).json({ message: 'Server error while fetching locations' });
   }
 };

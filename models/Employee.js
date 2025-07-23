@@ -74,21 +74,17 @@ const employeeSchema = new mongoose.Schema({
 });
 
 // Initialize employmentHistory, monthlyLeaves, and advances for new employees
-employeeSchema.pre('save', function (next) {
-  if (this.isNew && !this.employmentHistory.length) {
-    this.employmentHistory = [{
-      startDate: this.joinDate,
-      status: 'active',
-    }];
-  }
-  if (this.isNew && !this.monthlyLeaves.length) {
-    const joinDate = new Date(this.joinDate);
-    const joinYear = joinDate.getFullYear();
-    const joinMonth = joinDate.getMonth() + 1;
-    const currentYear = new Date().getFullYear();
-    const currentMonth = new Date().getMonth() + 1;
-    const monthlyAllocation = 24 / 12;
+employeeSchema.pre('save', async function (next) {
+  const joinDate = new Date(this.joinDate);
+  const joinYear = joinDate.getFullYear();
+  const joinMonth = joinDate.getMonth() + 1;
+  const currentYear = new Date().getFullYear();
+  const currentMonth = new Date().getMonth() + 1;
+  const settings = await mongoose.model('Settings').findOne().lean();
+  const monthlyAllocation = (settings?.paidLeavesPerYear || 24) / 12;
 
+  // Initialize monthlyLeaves only for new employees
+  if (this.isNew && (!this.monthlyLeaves || this.monthlyLeaves.length === 0)) {
     this.monthlyLeaves = [];
     for (let y = joinYear; y <= currentYear; y++) {
       const startMonth = y === joinYear ? joinMonth : 1;
@@ -105,13 +101,17 @@ employeeSchema.pre('save', function (next) {
       }
     }
   }
-  if (this.isNew && !this.advances.length) {
-    const joinDate = new Date(this.joinDate);
-    const joinYear = joinDate.getFullYear();
-    const joinMonth = joinDate.getMonth() + 1;
-    const currentYear = new Date().getFullYear();
-    const currentMonth = new Date().getMonth() + 1;
 
+  // Initialize employmentHistory for new employees
+  if (this.isNew && !this.employmentHistory.length) {
+    this.employmentHistory = [{
+      startDate: this.joinDate,
+      status: 'active',
+    }];
+  }
+
+  // Initialize advances for new employees
+  if (this.isNew && !this.advances.length) {
     this.advances = [];
     for (let y = joinYear; y <= currentYear; y++) {
       const startMonth = y === joinYear ? joinMonth : 1;
@@ -127,6 +127,14 @@ employeeSchema.pre('save', function (next) {
       }
     }
   }
+
+  // Only update paidLeaves based on existing monthlyLeaves data
+  if (!this.isNew) {
+    const totalTaken = this.monthlyLeaves.reduce((sum, ml) => sum + ml.taken, 0);
+    this.paidLeaves.used = totalTaken;
+    this.paidLeaves.available = (settings?.paidLeavesPerYear || 24) - totalTaken;
+  }
+
   next();
 });
 

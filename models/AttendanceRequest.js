@@ -1,4 +1,3 @@
-// models/AttendanceRequest.js
 import mongoose from 'mongoose';
 
 const attendanceRequestSchema = new mongoose.Schema({
@@ -13,7 +12,7 @@ const attendanceRequestSchema = new mongoose.Schema({
     required: true,
   },
   date: {
-    type: String, // Changed to String
+    type: String,
     required: true,
     validate: {
       validator: function (value) {
@@ -46,6 +45,10 @@ const attendanceRequestSchema = new mongoose.Schema({
   },
   reviewedAt: {
     type: Date,
+  },
+  isDeleted: {
+    type: Boolean,
+    default: false, // Added to ensure new documents have isDeleted: false
   },
 }, {
   timestamps: true,
