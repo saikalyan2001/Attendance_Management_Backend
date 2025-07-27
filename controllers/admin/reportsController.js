@@ -118,6 +118,10 @@ export const getLeaveReport = async (req, res) => {
     const { location, month, year, page = 1, limit = 10 } = req.query;
     const match = { status: "active", isDeleted: false };
 
+    // Fetch settings
+    const settings = await Settings.findOne().lean();
+    const PAID_LEAVE_LIMIT = settings?.paidLeavesPerYear / 12 || 2;
+
     // Parse pagination parameters
     const pageNum = parseInt(page, 10);
     const limitNum = parseInt(limit, 10);
@@ -159,19 +163,19 @@ export const getLeaveReport = async (req, res) => {
       ) || {
         year: yearNum,
         month: monthNum,
-        allocated: 2,
+        allocated: PAID_LEAVE_LIMIT, // Use settings value
         taken: 0,
         carriedForward: 0,
-        available: 2,
+        available: PAID_LEAVE_LIMIT, // Use settings value
       };
       return {
         ...emp,
-        monthlyLeaves: [monthlyLeave], // Return only the matching monthlyLeaves
+        monthlyLeaves: [monthlyLeave],
       };
     });
 
     const summary = await Employee.aggregate([
-      { $match: match },
+      { $match: { status: "active", isDeleted: false } },
       { $unwind: "$monthlyLeaves" },
       {
         $match: {

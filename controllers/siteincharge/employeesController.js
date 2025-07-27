@@ -7,6 +7,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { initializeMonthlyLeaves } from '../../utils/leaveUtils.js';
+import expressAsyncHandler from 'express-async-handler';
+import AppError from '../../utils/AppError.js';
+import XLSX from "xlsx";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,7 +56,7 @@ export const getEmployees = async (req, res) => {
 
   while (retries < maxRetries) {
     try {
-      const { location, status, page = 1, limit = 5, month, year } = req.query;
+      const { location, status, page = 1, limit = 5, month, year, isDeleted } = req.query;
 
       // Validate pagination parameters
       const pageNum = parseInt(page, 10);
@@ -64,7 +67,22 @@ export const getEmployees = async (req, res) => {
 
       const query = {};
       if (location) query.location = location;
-      if (status) query.status = status;
+      // Handle status filter: map 'deleted' to isDeleted=true, otherwise filter by status
+      if (status) {
+        if (status === 'deleted') {
+          query.isDeleted = true;
+        } else {
+          query.status = status;
+          query.isDeleted = false; // Ensure non-deleted employees for active/inactive
+        }
+      } else {
+        query.isDeleted = isDeleted === 'true' ? true : false; // Default to isDeleted filter if provided
+      }
+
+      const userLocationIds = getUserLocationIds(req.user);
+      if (location && !userLocationIds.includes(location)) {
+        return res.status(403).json({ message: 'Location not assigned to user' });
+      }
 
       const skip = (pageNum - 1) * limitNum;
 
@@ -76,7 +94,7 @@ export const getEmployees = async (req, res) => {
         // Fetch total count and employees without modifying documents
         const total = await Employee.countDocuments(query).session(session);
         const employees = await Employee.find(query)
-          .populate("location")
+          .populate("location", "name address")
           .sort({ employeeId: 1 })
           .skip(skip)
           .limit(limitNum)
@@ -339,53 +357,64 @@ export const getAttendance = async (req, res) => {
   }
 };
 
-export const getEmployeeAttendance = async (req, res) => {
+export const getEmployeeAttendance = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const { month, year } = req.query;
+    const { id: employeeId } = req.params;
+    const { month, year, page = 1, limit = 10 } = req.query;
 
-    if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ message: 'Invalid employee ID' });
-    }
-
-    if (!month || !year) {
-      return res.status(400).json({ message: 'Month and year are required' });
-    }
-
+    // Validate inputs
     const monthNum = parseInt(month);
     const yearNum = parseInt(year);
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
 
-    if (isNaN(monthNum) || isNaN(yearNum) || monthNum < 1 || monthNum > 12) {
-      return res.status(400).json({ message: 'Invalid month or year' });
+    if (!month || !year || isNaN(monthNum) || isNaN(yearNum)) {
+      return next(createError(400, 'Month and year are required and must be valid numbers'));
+    }
+    if (monthNum < 1 || monthNum > 12) {
+      return next(createError(400, 'Month must be between 1 and 12'));
+    }
+    if (yearNum < 1900 || yearNum > new Date().getFullYear() + 1) {
+      return next(createError(400, 'Year is invalid'));
     }
 
-    const employee = await Employee.findById(id).lean();
-    if (!employee) {
-      return res.status(404).json({ message: 'Employee not found' });
-    }
+    // Construct IST date range
+    const startDate = new Date(yearNum, monthNum - 1, 1, 0, 0, 0);
+    const endDate = new Date(yearNum, monthNum, 1, 0, 0, 0);
+    const startDateStr = startDate.toISOString().split('T')[0] + 'T00:00:00.000+05:30';
+    const endDateStr = endDate.toISOString().split('T')[0] + 'T00:00:00.000+05:30';
 
-    const userLocationIds = getUserLocationIds(req.user);
-    const employeeLocationId = normalizeLocationId(employee.location);
-
-    if (!userLocationIds.includes(employeeLocationId)) {
-      return res.status(403).json({ message: 'Employee not in assigned location' });
-    }
-
-    const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1));
-    const endDate = new Date(Date.UTC(yearNum, monthNum, 1));
-
+    // Query attendance
     const attendance = await Attendance.find({
-      employee: id,
-      date: { $gte: startDate, $lt: endDate },
+      employee: employeeId,
+      date: { $gte: startDateStr, $lt: endDateStr },
       isDeleted: false,
     })
-      .sort({ date: -1, updatedAt: -1 })
-      .lean();
+      .lean()
+      .skip((pageNum - 1) * limitNum)
+      .limit(limitNum);
 
-    res.json({ attendance });
+    // Count total records for pagination
+    const totalRecords = await Attendance.countDocuments({
+      employee: employeeId,
+      date: { $gte: startDateStr, $lt: endDateStr },
+      isDeleted: false,
+    });
+
+    // Prepare response
+    const response = {
+      attendance,
+      pagination: {
+        currentPage: pageNum,
+        totalPages: Math.ceil(totalRecords / limitNum),
+        totalRecords,
+        limit: limitNum,
+      },
+    };
+
+    res.status(200).json(response);
   } catch (error) {
-    console.error('Get employee attendance error:', error);
-    res.status(500).json({ message: 'Server error' });
+    next(error);
   }
 };
 
@@ -692,6 +721,8 @@ export const rejoinEmployee = async (req, res) => {
       return res.status(400).json({ message: 'Invalid rejoin date' });
     }
 
+    const parsedRejoinDate = new Date(rejoinDate);
+
     // Fetch employee
     const employee = await Employee.findById(id);
     if (!employee) {
@@ -712,11 +743,16 @@ export const rejoinEmployee = async (req, res) => {
 
     // Validate rejoin date against last endDate
     const latestEmployment = employee.employmentHistory[employee.employmentHistory.length - 1];
-    if (latestEmployment.endDate && new Date(rejoinDate) <= new Date(latestEmployment.endDate)) {
+    if (latestEmployment && latestEmployment.endDate && parsedRejoinDate <= new Date(latestEmployment.endDate)) {
       return res.status(400).json({ message: 'Rejoin date must be after the last end date' });
     }
 
-    // Fetch settings with fallback
+    // Ensure employmentHistory exists
+    if (!employee.employmentHistory) {
+      employee.employmentHistory = [];
+    }
+
+    // Fetch settings for paidLeavesPerYear
     let settings = await Settings.findOne();
     if (!settings) {
       settings = await Settings.create({
@@ -726,23 +762,16 @@ export const rejoinEmployee = async (req, res) => {
     }
 
     // Calculate prorated leaves
-    const proratedLeaves = calculateProratedLeaves(rejoinDate, settings.paidLeavesPerYear);
+    const proratedLeaves = calculateProratedLeaves(parsedRejoinDate, settings.paidLeavesPerYear);
 
-    // Update employee status and employment history
+    // Update status and employment history
     employee.status = 'active';
-    const currentPeriod = employee.employmentHistory[employee.employmentHistory.length - 1];
-    if (currentPeriod && !currentPeriod.endDate) {
-      currentPeriod.endDate = new Date(rejoinDate);
-      currentPeriod.status = 'active';
-      currentPeriod.leaveBalanceAtEnd = employee.paidLeaves.available;
-    }
-
     employee.employmentHistory.push({
-      startDate: new Date(rejoinDate),
+      startDate: parsedRejoinDate,
       status: 'active',
     });
 
-    // Update paidLeaves with prorated value
+    // Set prorated leave balance
     employee.paidLeaves = {
       available: proratedLeaves,
       used: 0,
@@ -750,17 +779,25 @@ export const rejoinEmployee = async (req, res) => {
     };
 
     // Update monthlyLeaves for the rejoin month
-    const joinYear = new Date(rejoinDate).getFullYear();
-    const joinMonth = new Date(rejoinDate).getMonth() + 1;
+    const joinYear = parsedRejoinDate.getFullYear();
+    const joinMonth = parsedRejoinDate.getMonth() + 1;
     const monthlyAllocation = settings.paidLeavesPerYear / 12;
-    employee.monthlyLeaves.push({
-      year: joinYear,
-      month: joinMonth,
-      allocated: monthlyAllocation,
-      taken: 0,
-      carriedForward: 0,
-      available: monthlyAllocation,
-    });
+    const existingMonthlyLeave = employee.monthlyLeaves.find(
+      (ml) => ml.year === joinYear && ml.month === joinMonth
+    );
+    if (!existingMonthlyLeave) {
+      employee.monthlyLeaves.push({
+        year: joinYear,
+        month: joinMonth,
+        allocated: monthlyAllocation,
+        taken: 0,
+        carriedForward: 0,
+        available: monthlyAllocation,
+      });
+    } else {
+      existingMonthlyLeave.allocated = monthlyAllocation;
+      existingMonthlyLeave.available = monthlyAllocation - existingMonthlyLeave.taken;
+    }
 
     // Reset transferTimestamp
     employee.transferTimestamp = null;
@@ -902,20 +939,55 @@ export const deleteEmployee = async (req, res) => {
       return res.status(403).json({ message: 'Employee not in assigned location' });
     }
 
-    for (const doc of employee.documents) {
-      const filePath = path.join(__dirname, '..', '..', doc.path);
-      await fs.unlink(filePath).catch((err) => {
-        console.error(`Failed to delete file ${filePath}:`, err);
-      });
+    if (employee.isDeleted) {
+      return res.status(400).json({ message: 'Employee is already deleted' });
     }
 
-    await Attendance.deleteMany({ employee: id });
-    await Employee.findByIdAndDelete(id);
+    employee.isDeleted = true;
+    await employee.save();
 
-    res.json({ message: 'Employee deleted successfully' });
+    res.json({ id: employee._id.toString(), message: 'Employee deleted successfully' });
   } catch (error) {
     console.error('Delete employee error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+export const restoreEmployee = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid employee ID' });
+    }
+
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    const userLocationIds = getUserLocationIds(req.user);
+    const employeeLocationId = normalizeLocationId(employee.location);
+
+    if (!userLocationIds.includes(employeeLocationId)) {
+      return res.status(403).json({ message: 'Employee not in assigned location' });
+    }
+
+    if (!employee.isDeleted) {
+      return res.status(400).json({ message: 'Employee is not deleted' });
+    }
+
+    employee.isDeleted = false;
+    await employee.save();
+
+    const populatedEmployee = await Employee.findById(id)
+      .populate('location', 'name address')
+      .lean();
+
+    res.json({ employee: populatedEmployee, message: 'Employee restored successfully' });
+  } catch (error) {
+    console.error('Restore employee error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
 
@@ -946,16 +1018,13 @@ export const deactivateEmployee = async (req, res) => {
     employee.status = 'inactive';
 
     const currentPeriod = employee.employmentHistory[employee.employmentHistory.length - 1];
-    if (currentPeriod && !currentPeriod.endDate) {
+    if (currentPeriod && !currentPeriod.endDate && currentPeriod.status === 'active') {
       currentPeriod.endDate = new Date();
       currentPeriod.status = 'inactive';
       currentPeriod.leaveBalanceAtEnd = employee.paidLeaves.available;
+    } else {
+      return res.status(400).json({ message: 'Invalid employment history state for deactivation' });
     }
-
-    employee.employmentHistory.push({
-      startDate: new Date(),
-      status: 'inactive',
-    });
 
     await employee.save();
 
@@ -1127,3 +1196,328 @@ export const updateEmployeeAdvance = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+export const addEmployeesFromExcel = expressAsyncHandler(async (req, res, next) => {
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+
+    console.log('Received fields:', Object.keys(req.files || {}));
+    console.log('Received file (excelFile):', req.file || 'No excel file received');
+
+    if (!req.file) {
+      throw new AppError('No Excel file uploaded', 400);
+    }
+
+    if (!req.user || !req.user.locations || req.user.locations.length === 0) {
+      throw new AppError('No location assigned to user', 403);
+    }
+
+    const excelFile = req.file;
+
+    // Fetch all locations accessible to the user
+    const userLocationIds = getUserLocationIds(req.user);
+    const locations = await Location.find({ _id: { $in: userLocationIds } })
+      .select('name _id')
+      .lean()
+      .session(session);
+
+    const locationMap = locations.reduce((map, loc) => {
+      map[loc.name.toLowerCase()] = loc._id.toString();
+      return map;
+    }, {});
+
+    console.log('Location map:', locationMap);
+
+    const requiredHeaders = [
+      'employeeId',
+      'name',
+      'email',
+      'designation',
+      'department',
+      'salary',
+      'phone',
+      'joinDate',
+      'accountNo',
+      'ifscCode',
+      'bankName',
+      'accountHolder',
+      'locationName',
+    ];
+
+    let employees = [];
+    const fileExtension = excelFile.originalname.split('.').pop().toLowerCase();
+
+    if (fileExtension === 'csv') {
+      console.log('Processing as CSV file');
+      const text = await fs.readFile(excelFile.path, 'utf8');
+      const cleanedText = text.replace(/^\uFEFF/, '');
+      console.log('CSV content (first 100 chars):', cleanedText.slice(0, 100));
+
+      const records = await new Promise((resolve, reject) => {
+        const parser = parse({
+          columns: true,
+          trim: true,
+          skip_empty_lines: true,
+          skip_lines_with_error: true,
+        });
+        const results = [];
+        parser.on('readable', () => {
+          let record;
+          while ((record = parser.read())) {
+            results.push(record);
+          }
+        });
+        parser.on('error', reject);
+        parser.on('end', () => resolve(results));
+        parser.write(cleanedText);
+        parser.end();
+      });
+
+      console.log('Raw parsed CSV data:', JSON.stringify(records, null, 2));
+      employees = records;
+    } else if (['xlsx', 'xls'].includes(fileExtension)) {
+      console.log('Processing as Excel file');
+      const fileBuffer = await fs.readFile(excelFile.path);
+      const workbook = XLSX.read(fileBuffer, { type: 'buffer', dateNF: 'yyyy-mm-dd' });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      console.log('Sheet name:', sheetName);
+      employees = XLSX.utils.sheet_to_json(sheet, {
+        header: 1,
+        blankrows: false,
+        raw: false,
+        dateNF: 'yyyy-mm-dd',
+      });
+      console.log('Raw Excel data:', JSON.stringify(employees, null, 2));
+
+      if (employees.length < 1) {
+        throw new AppError('Excel file is empty', 400);
+      }
+      const headers = employees[0].map((h) => h.toString().trim().toLowerCase());
+      console.log('Original Excel headers:', headers);
+      employees = employees
+        .slice(1)
+        .map((row) => {
+          const obj = {};
+          headers.forEach((header, i) => {
+            const normalizedHeader = requiredHeaders.find(
+              (reqHeader) => reqHeader.toLowerCase() === header
+            ) || header;
+            obj[normalizedHeader] = row[i] !== undefined ? row[i] : null;
+          });
+          return obj;
+        })
+        .filter((emp) => {
+          return Object.values(emp).some((val) => val !== null && val !== '');
+        });
+    } else {
+      throw new AppError('Unsupported file format', 400);
+    }
+
+    console.log('Parsed employees:', JSON.stringify(employees, null, 2));
+    const fileHeaders = employees.length > 0 ? Object.keys(employees[0]).map(h => h.toLowerCase()) : [];
+    console.log('Parsed file headers:', fileHeaders);
+
+    const missingHeaders = requiredHeaders.filter((h) => !fileHeaders.includes(h.toLowerCase()));
+    if (missingHeaders.length > 0) {
+      throw new AppError(`Missing required headers: ${missingHeaders.join(', ')}`, 400);
+    }
+
+    const errors = [];
+    const validEmployees = [];
+
+    let settings = await Settings.findOne().session(session);
+    if (!settings) {
+      settings = await Settings.create(
+        [{ paidLeavesPerYear: 24, halfDayDeduction: 0.5 }],
+        { session }
+      );
+      settings = settings[0];
+    }
+
+    for (let i = 0; i < employees.length; i++) {
+      const emp = employees[i];
+      const row = i + 2; // Account for header row
+      try {
+        // Basic validation
+        if (
+          !emp.employeeId ||
+          !emp.name ||
+          !emp.email ||
+          !emp.designation ||
+          !emp.department ||
+          !emp.salary ||
+          !emp.phone ||
+          !emp.joinDate ||
+          !emp.accountNo ||
+          !emp.ifscCode ||
+          !emp.bankName ||
+          !emp.accountHolder ||
+          !emp.locationName
+        ) {
+          errors.push({ row, message: 'Missing required fields' });
+          continue;
+        }
+
+        // Validate locationName
+        const locationId = locationMap[emp.locationName.toLowerCase()];
+        if (!locationId) {
+          errors.push({ row, message: `Invalid location name: ${emp.locationName}` });
+          continue;
+        }
+        if (!userLocationIds.includes(locationId)) {
+          errors.push({ row, message: `Location ${emp.locationName} not assigned to user` });
+          continue;
+        }
+
+        // Additional validations
+        if (!/^[A-Z0-9-]+$/.test(emp.employeeId)) {
+          errors.push({ row, message: 'Employee ID must be alphanumeric with hyphens' });
+          continue;
+        }
+        if (!/^[a-zA-Z\s]+$/.test(emp.name)) {
+          errors.push({ row, message: 'Name must contain only letters and spaces' });
+          continue;
+        }
+        if (!/^\d{10,15}$/.test(emp.phone)) {
+          errors.push({ row, message: 'Phone number must be 10 to 15 digits' });
+          continue;
+        }
+        const parsedSalary = Number(emp.salary);
+        if (isNaN(parsedSalary) || parsedSalary < 1000 || parsedSalary > 10000000) {
+          errors.push({ row, message: 'Salary must be a number between 1000 and 10,000,000' });
+          continue;
+        }
+
+        // Validate and parse joinDate
+        let parsedJoinDate;
+        if (typeof emp.joinDate === 'number') {
+          parsedJoinDate = XLSX.SSF.parse_date_code(emp.joinDate);
+          parsedJoinDate = new Date(parsedJoinDate.y, parsedJoinDate.m - 1, parsedJoinDate.d);
+        } else {
+          parsedJoinDate = new Date(emp.joinDate);
+        }
+
+        if (isNaN(parsedJoinDate) || parsedJoinDate > new Date()) {
+          errors.push({ row, message: 'Invalid or future join date' });
+          continue;
+        }
+
+        // Validate email format
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emp.email)) {
+          errors.push({ row, message: 'Invalid email address' });
+          continue;
+        }
+
+        // Check for duplicates
+        const existingEmployee = await Employee.findOne({
+          $or: [
+            { employeeId: emp.employeeId },
+            { email: emp.email.toLowerCase() },
+            { phone: emp.phone },
+          ],
+        }).session(session);
+        if (existingEmployee) {
+          errors.push({
+            row,
+            message: `Duplicate found: ${existingEmployee.employeeId === emp.employeeId ? 'Employee ID' : existingEmployee.email === emp.email.toLowerCase() ? 'Email' : 'Phone'} already exists`,
+          });
+          continue;
+        }
+
+        const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
+        const paidLeavesPerMonth = settings.paidLeavesPerYear / 12;
+
+        validEmployees.push({
+          employeeId: emp.employeeId,
+          name: emp.name,
+          email: emp.email.toLowerCase(),
+          designation: emp.designation,
+          department: emp.department,
+          salary: parsedSalary,
+          location: locationId, // Use mapped locationId
+          phone: emp.phone,
+          joinDate: parsedJoinDate,
+          bankDetails: {
+            accountNo: emp.accountNo,
+            ifscCode: emp.ifscCode,
+            bankName: emp.bankName,
+            accountHolder: emp.accountHolder,
+          },
+          paidLeaves: {
+            available: proratedLeaves,
+            used: 0,
+            carriedForward: 0,
+          },
+          documents: [],
+          createdBy: req.user._id,
+          status: 'active',
+          employmentHistory: [
+            {
+              startDate: parsedJoinDate,
+              status: 'active',
+            },
+          ],
+          monthlyLeaves: [
+            {
+              year: parsedJoinDate.getFullYear(),
+              month: parsedJoinDate.getMonth() + 1,
+              allocated: paidLeavesPerMonth,
+              taken: 0,
+              carriedForward: 0,
+              available: paidLeavesPerMonth,
+            },
+          ],
+          advances: [],
+          advanceHistory: [],
+        });
+      } catch (err) {
+        errors.push({ row, message: err.message });
+      }
+    }
+
+    console.log('Validation errors:', JSON.stringify(errors, null, 2));
+    console.log('Valid employees:', JSON.stringify(validEmployees, null, 2));
+
+    if (errors.length > 0) {
+      throw new AppError('Validation errors in file', 400, errors);
+    }
+
+    if (validEmployees.length === 0) {
+      throw new AppError('No valid employees to register', 400);
+    }
+
+    const insertedEmployees = await Employee.insertMany(validEmployees, { session });
+    const populatedEmployees = await Employee.find({ _id: { $in: insertedEmployees.map(emp => emp._id) } })
+      .populate('location', 'name address')
+      .session(session)
+      .lean();
+
+    await session.commitTransaction();
+    res.status(201).json({
+      message: 'Employees imported successfully',
+      count: insertedEmployees.length,
+      employees: populatedEmployees,
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('addEmployeesFromExcel error:', error);
+    if (error instanceof AppError) {
+      return res.status(error.status || 500).json({
+        message: error.message,
+        errors: error.errors || [],
+      });
+    }
+    res.status(500).json({ message: 'Server error', error: error.message });
+  } finally {
+    session.endSession();
+    if (req.file?.path) {
+      await fs.unlink(req.file.path).catch((err) => {
+        console.error(`Failed to delete file ${req.file.path}:`, err);
+      });
+    }
+  }
+});
+
+

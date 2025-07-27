@@ -1710,6 +1710,48 @@ const restoreEmployee = asyncHandler(async (req, res) => {
   });
 });
 
+export const getEmployeeAttendance = asyncHandler(async (req, res) => {
+  const { id } = req.params; // Employee ID from URL
+  const { month, year, page = 1, limit = 10 } = req.query;
+
+  // Validate employee exists
+  const employee = await Employee.findById(id);
+  if (!employee || employee.isDeleted) {
+    res.status(404);
+    throw new Error("Employee not found");
+  }
+
+  // Build query for attendance
+  const query = {
+    employee: id, // Filter by employee ID
+    ...(month && year && {
+      date: {
+        $gte: new Date(year, month - 1, 1),
+        $lt: new Date(year, month, 1),
+      },
+    }),
+  };
+
+  // Fetch attendance with pagination
+  const totalItems = await Attendance.countDocuments(query);
+  const attendance = await Attendance.find(query)
+    .populate("employee", "name employeeId")
+    .populate("location", "name")
+    .sort({ date: -1 })
+    .skip((page - 1) * limit)
+    .limit(Number(limit));
+
+  res.status(200).json({
+    attendance,
+    pagination: {
+      currentPage: Number(page),
+      totalPages: Math.ceil(totalItems / limit),
+      totalItems,
+      itemsPerPage: Number(limit),
+    },
+  });
+});
+
 
 
 export {
