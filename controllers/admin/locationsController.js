@@ -5,10 +5,11 @@ import Employee from '../../models/Employee.js';
 export const getLocations = async (req, res) => {
   try {
     const { user } = req;
-    let query = {};
+    let query = { isDeleted: false }; // Include only non-deleted locations
     if (user.role === 'siteincharge') {
       query._id = { $in: user.locations };
     }
+    // No filtering for super_admin or admin
     const locations = await Location.find(query).lean();
     const locationsWithCount = await Promise.all(
       locations.map(async (loc) => {

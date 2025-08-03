@@ -20,6 +20,12 @@ import reportsRoutes from './routes/admin/reports.js';
 import attendanceRoutes from './routes/admin/attendance.js';
 import employeesRoutes from './routes/admin/employees.js';
 import profileRoutes from './routes/admin/profile.js';
+import superAdminRoutes from './routes/superadmin/superAdmin.js';
+import superAdminLocationsRoutes from './routes/superadmin/locations.js';
+import superAdminSettingsRoutes from './routes/superadmin/settings.js';
+import superAdminEmployeesRoutes from './routes/superadmin/employees.js';
+import superAdminAttendanceRoutes from './routes/superadmin/attendance.js'; // New import
+import superAdminReportsRoutes from './routes/superadmin/reports.js'; // New import
 
 dotenv.config();
 
@@ -38,7 +44,7 @@ fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', protect, restrictTo('admin', 'siteincharge'), async (req, res, next) => {
+app.use('/uploads', protect, restrictTo('admin', 'siteincharge', 'super_admin'), async (req, res, next) => {
   const decodedPath = decodeURIComponent(req.path);
   const filePath = path.join(__dirname, 'Uploads', 'documents', decodedPath.replace('/documents/', ''));
   console.log('Attempting to serve file:', filePath);
@@ -65,6 +71,12 @@ app.use('/api/admin', reportsRoutes);
 app.use('/api/admin', attendanceRoutes);
 app.use('/api/admin', employeesRoutes);
 app.use('/api/admin', profileRoutes);
+app.use('/api/superadmin', superAdminRoutes);
+app.use('/api/superadmin', superAdminLocationsRoutes);
+app.use('/api/superadmin', superAdminSettingsRoutes);
+app.use('/api/superadmin', superAdminEmployeesRoutes); 
+app.use('/api/superadmin', superAdminAttendanceRoutes); // Mount superadmin employees routes
+app.use('/api/superadmin', superAdminReportsRoutes); // Mount superadmin employees routes
 
 // Error handling middleware
 app.use((err, req, res, next) => {

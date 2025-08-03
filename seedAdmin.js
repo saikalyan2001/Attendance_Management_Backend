@@ -16,7 +16,7 @@ const seedAdmin = async () => {
         useNewUrlParser: true,
         useUnifiedTopology: true,
       });
-      ('MongoDB connected for seeding');
+      console.log('MongoDB connected for seeding');
     }
 
     // Admin user data from environment variables
@@ -29,17 +29,30 @@ const seedAdmin = async () => {
       locations: [],
     };
 
+    // Super Admin user data from environment variables
+    const superAdminData = {
+      email: process.env.SUPER_ADMIN_EMAIL || 'superadmin@gmail.com',
+      password: process.env.SUPER_ADMIN_PASSWORD || 'superadmin123',
+      name: process.env.SUPER_ADMIN_NAME || 'Super Admin',
+      phone: process.env.SUPER_ADMIN_PHONE || '0987654321',
+      role: 'super_admin',
+      locations: [],
+    };
+
     // Validate required environment variables
     if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) {
-      ('❌ ADMIN_EMAIL and ADMIN_PASSWORD must be set in environment variables');
-      throw new Error('Missing required environment variables');
+      console.error('❌ ADMIN_EMAIL and ADMIN_PASSWORD must be set in environment variables');
+      throw new Error('Missing required admin environment variables');
+    }
+    if (!process.env.SUPER_ADMIN_EMAIL || !process.env.SUPER_ADMIN_PASSWORD) {
+      console.error('❌ SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD must be set in environment variables');
+      throw new Error('Missing required super admin environment variables');
     }
 
     // Check for existing admin
     const existingAdmin = await User.findOne({ email: adminData.email });
-
     if (existingAdmin) {
-      (`🔁 Admin user exists: ${adminData.email}, updating password...`);
+      console.log(`🔁 Admin user exists: ${adminData.email}, updating password...`);
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(adminData.password, salt);
 
@@ -51,24 +64,52 @@ const seedAdmin = async () => {
       if (result.modifiedCount === 0) {
         console.warn('⚠️ No changes made to admin user (possibly same password or data)');
       } else {
-        ('✅ Admin user updated successfully');
+        console.log('✅ Admin user updated successfully');
       }
-      return;
+    } else {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(adminData.password, salt);
+
+      const admin = new User({
+        ...adminData,
+        password: hashedPassword,
+      });
+
+      await admin.save();
+      console.log('✅ Admin user created successfully:', adminData.email);
     }
 
-    // Create new admin user
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(adminData.password, salt);
+    // Check for existing super admin
+    const existingSuperAdmin = await User.findOne({ email: superAdminData.email });
+    if (existingSuperAdmin) {
+      console.log(`🔁 Super Admin user exists: ${superAdminData.email}, updating password...`);
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(superAdminData.password, salt);
 
-    const admin = new User({
-      ...adminData,
-      password: hashedPassword,
-    });
+      const result = await User.updateOne(
+        { email: superAdminData.email },
+        { $set: { password: hashedPassword, name: superAdminData.name, phone: superAdminData.phone } }
+      );
 
-    await admin.save();
-    ('✅ Admin user created successfully:', adminData.email);
+      if (result.modifiedCount === 0) {
+        console.warn('⚠️ No changes made to super admin user (possibly same password or data)');
+      } else {
+        console.log('✅ Super Admin user updated successfully');
+      }
+    } else {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(superAdminData.password, salt);
+
+      const superAdmin = new User({
+        ...superAdminData,
+        password: hashedPassword,
+      });
+
+      await superAdmin.save();
+      console.log('✅ Super Admin user created successfully:', superAdminData.email);
+    }
   } catch (error) {
-    ('❌ Error seeding admin:', error.message);
+    console.error('❌ Error seeding users:', error.message);
     throw error;
   }
 };

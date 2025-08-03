@@ -9,6 +9,7 @@ import { parse } from "csv-parse/sync";
 import Location from "../../models/Location.js";
 import xlsx from "xlsx";
 import AppError from "../../utils/AppError.js";
+import Attendance from "../../models/Attendance.js";
 
 // Helper function to calculate prorated leaves
 const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {

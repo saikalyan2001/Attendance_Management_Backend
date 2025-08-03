@@ -1,3 +1,4 @@
+// src/backend/models/User.js
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 
@@ -6,7 +7,7 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   name: { type: String, required: true },
   phone: { type: String },
-  role: { type: String, enum: ['admin', 'siteincharge'], default: 'siteincharge' },
+  role: { type: String, enum: ['admin', 'siteincharge', 'super_admin'], default: 'siteincharge' },
   locations: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Location' }],
   profilePicture: {
     path: { type: String },
