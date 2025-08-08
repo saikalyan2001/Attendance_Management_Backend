@@ -1753,6 +1753,158 @@ export const getEmployeeAttendance = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc    Get paginated documents for an employee
+// @route   GET /api/admin/employees/:id/documents?page=<page>&limit=<limit>
+// @access  Private/Admin
+const getEmployeeDocuments = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { page = 1, limit = 5, searchQuery = "" } = req.query;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400);
+    throw new Error("Invalid employee ID");
+  }
+
+  const parsedPage = parseInt(page, 10);
+  const parsedLimit = parseInt(limit, 10);
+  if (isNaN(parsedPage) || parsedPage < 1) {
+    res.status(400);
+    throw new Error("Invalid page number");
+  }
+  if (isNaN(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+    res.status(400);
+    throw new Error("Invalid limit value (must be between 1 and 100)");
+  }
+
+  const skip = (parsedPage - 1) * parsedLimit;
+
+  const pipeline = [
+    { $match: { _id: new mongoose.Types.ObjectId(id) } },
+    {
+      $lookup: {
+        from: "locations",
+        localField: "location",
+        foreignField: "_id",
+        as: "location",
+      },
+    },
+    { $unwind: { path: "$location", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "users",
+        localField: "createdBy",
+        foreignField: "_id",
+        as: "createdBy",
+      },
+    },
+    { $unwind: { path: "$createdBy", preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        employeeId: 1,
+        name: 1,
+        email: 1,
+        designation: 1,
+        department: 1,
+        salary: 1,
+        location: { name: 1, _id: 1 },
+        paidLeaves: 1,
+        advances: 1,
+        phone: 1,
+        dob: 1,
+        joinDate: 1,
+        bankDetails: 1,
+        createdBy: { name: 1, _id: 1 },
+        status: 1,
+        transferHistory: 1,
+        employmentHistory: 1,
+        advanceHistory: 1,
+        transferTimestamp: 1,
+        monthlyLeaves: 1,
+        filteredDocuments: {
+          $filter: {
+            input: "$documents",
+            as: "doc",
+            cond: {
+              $regexMatch: {
+                input: "$$doc.name",
+                regex: searchQuery,
+                options: "i", // Case-insensitive
+              },
+            },
+          },
+        },
+        totalDocuments: {
+          $cond: {
+            if: { $eq: [searchQuery, ""] },
+            then: { $size: "$documents" },
+            else: {
+              $size: {
+                $filter: {
+                  input: "$documents",
+                  as: "doc",
+                  cond: {
+                    $regexMatch: {
+                      input: "$$doc.name",
+                      regex: searchQuery,
+                      options: "i",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      $project: {
+        employeeId: 1,
+        name: 1,
+        email: 1,
+        designation: 1,
+        department: 1,
+        salary: 1,
+        location: 1,
+        paidLeaves: 1,
+        advances: 1,
+        phone: 1,
+        dob: 1,
+        joinDate: 1,
+        bankDetails: 1,
+        createdBy: 1,
+        status: 1,
+        transferHistory: 1,
+        employmentHistory: 1,
+        advanceHistory: 1,
+        transferTimestamp: 1,
+        monthlyLeaves: 1,
+        totalDocuments: 1,
+        documents: { $slice: ["$filteredDocuments", skip, parsedLimit] },
+      },
+    },
+  ];
+
+  const [employee] = await Employee.aggregate(pipeline);
+  if (!employee) {
+    res.status(404);
+    throw new Error("Employee not found");
+  }
+
+  const totalDocuments = employee.totalDocuments || 0;
+  const totalPages = Math.ceil(totalDocuments / parsedLimit);
+  delete employee.totalDocuments;
+  delete employee.filteredDocuments;
+
+  res.status(200).json({
+    employee,
+    pagination: {
+      currentPage: parsedPage,
+      totalPages,
+      totalItems: totalDocuments,
+      itemsPerPage: parsedLimit,
+    },
+  });
+});
 
 
 export {
@@ -1773,5 +1925,6 @@ export {
   addEmployeesFromExcel,
   getDepartments,
   deleteEmployee,
-  restoreEmployee
+  restoreEmployee,
+  getEmployeeDocuments
 };

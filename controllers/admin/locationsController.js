@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Location from '../../models/Location.js';
 import Employee from '../../models/Employee.js';
 
+// Original getLocations (unchanged)
 export const getLocations = async (req, res) => {
   try {
     const { user } = req;
@@ -27,6 +28,65 @@ export const getLocations = async (req, res) => {
   }
 };
 
+// New getPaginatedLocations for pagination and search
+export const getPaginatedLocations = async (req, res) => {
+  try {
+    const { user } = req;
+    const { search = "", page = 1, limit = 10, sortColumn = "name", sortOrder = "asc" } = req.query;
+    let query = { isDeleted: false };
+
+    if (user.role === "siteincharge") {
+      query._id = { $in: user.locations };
+    }
+
+    if (search) {
+      const regex = new RegExp(search, "i"); // Case-insensitive search
+      query.$or = [
+        { name: regex },
+        { address: regex },
+        { city: regex },
+        { state: regex },
+      ];
+    }
+
+    const sortOptions = {};
+    sortOptions[sortColumn] = sortOrder === "asc" ? 1 : -1;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const totalLocations = await Location.countDocuments(query);
+    const totalPages = Math.ceil(totalLocations / limitNum) || 1;
+    // Adjust currentPage if it exceeds totalPages
+    const adjustedPage = Math.min(pageNum, totalPages);
+
+    const locations = await Location.find(query)
+      .sort(sortOptions)
+      .skip((adjustedPage - 1) * limitNum)
+      .limit(limitNum)
+      .lean();
+
+    const locationsWithCount = await Promise.all(
+      locations.map(async (loc) => {
+        const employeeCount = await Employee.countDocuments({
+          location: loc._id,
+          isDeleted: false,
+        });
+        return { ...loc, employeeCount };
+      })
+    );
+
+    res.json({
+      locations: locationsWithCount,
+      totalPages,
+      currentPage: adjustedPage,
+    });
+  } catch (error) {
+    console.error("Get paginated locations error:", error.message);
+    res.status(500).json({ message: "Server error while fetching paginated locations" });
+  }
+};
+
+// Original addLocation (unchanged)
 export const addLocation = async (req, res) => {
   try {
     const { name, address, city, state } = req.body;
@@ -50,6 +110,7 @@ export const addLocation = async (req, res) => {
   }
 };
 
+// Original editLocation (unchanged)
 export const editLocation = async (req, res) => {
   try {
     const { id } = req.params;
@@ -90,6 +151,7 @@ export const editLocation = async (req, res) => {
   }
 };
 
+// Original deleteLocation (unchanged)
 export const deleteLocation = async (req, res) => {
   try {
     const { id } = req.params;

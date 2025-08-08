@@ -19,6 +19,7 @@ import {
   deleteEmployee,
   restoreEmployee,
   getEmployeeAttendance,
+  getEmployeeDocuments,
 } from "../../controllers/admin/employeesController.js";
 import { protect, restrictTo } from "../../middleware/authMiddleware.js";
 import upload from "../../utils/multer.js";
@@ -67,5 +68,7 @@ router.get("/employees/:id/history", getEmployeeHistory);
 router.post("/employees/:id/documents", upload.array("documents"), multerErrorHandler, addEmployeeDocuments);
 router.put("/employees/:id/restore", restoreEmployee);
 router.get("/:id/attendance", getEmployeeAttendance);
+router.get('/employees/:id/documents', getEmployeeDocuments);
+
 
 export default router;

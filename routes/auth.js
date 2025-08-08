@@ -1,5 +1,5 @@
 import express from 'express';
-import { login, signup, createSiteIncharge, createSuperAdmin, logout, getMe, getLocations } from '../controllers/authController.js';
+import { login, signup, createSiteIncharge, createSuperAdmin, logout, getMe, getLocations, setPassword, forgotPassword } from '../controllers/authController.js';
 import { protect, restrictTo } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
@@ -11,5 +11,7 @@ router.post('/create-superadmin', protect, restrictTo('super_admin'), createSupe
 router.post('/logout', protect, logout);
 router.get('/me', protect, getMe);
 router.get('/locations', getLocations);
+router.post('/set-password', setPassword);
+router.post('/forgot-password', forgotPassword);
 
 export default router;

@@ -1,12 +1,13 @@
-// src/backend/seedAdmin.js
 import mongoose from 'mongoose';
-import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
+import sgMail from '@sendgrid/mail';
 import User from './models/User.js';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 
 // Load environment variables
 dotenv.config();
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const seedAdmin = async () => {
   try {
@@ -22,90 +23,186 @@ const seedAdmin = async () => {
     // Admin user data from environment variables
     const adminData = {
       email: process.env.ADMIN_EMAIL || 'admin@gmail.com',
-      password: process.env.ADMIN_PASSWORD || '123456',
       name: process.env.ADMIN_NAME || 'Admin User',
       phone: process.env.ADMIN_PHONE || '1234567890',
       role: 'admin',
       locations: [],
+      resetPasswordToken: crypto.randomBytes(20).toString('hex'),
+      resetPasswordExpires: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
     };
 
     // Super Admin user data from environment variables
     const superAdminData = {
       email: process.env.SUPER_ADMIN_EMAIL || 'superadmin@gmail.com',
-      password: process.env.SUPER_ADMIN_PASSWORD || 'superadmin123',
       name: process.env.SUPER_ADMIN_NAME || 'Super Admin',
       phone: process.env.SUPER_ADMIN_PHONE || '0987654321',
       role: 'super_admin',
       locations: [],
+      resetPasswordToken: crypto.randomBytes(20).toString('hex'),
+      resetPasswordExpires: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
     };
 
     // Validate required environment variables
-    if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) {
-      console.error('❌ ADMIN_EMAIL and ADMIN_PASSWORD must be set in environment variables');
+    if (!process.env.ADMIN_EMAIL) {
+      console.error('❌ ADMIN_EMAIL must be set in environment variables');
       throw new Error('Missing required admin environment variables');
     }
-    if (!process.env.SUPER_ADMIN_EMAIL || !process.env.SUPER_ADMIN_PASSWORD) {
-      console.error('❌ SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD must be set in environment variables');
+    if (!process.env.SUPER_ADMIN_EMAIL) {
+      console.error('❌ SUPER_ADMIN_EMAIL must be set in environment variables');
       throw new Error('Missing required super admin environment variables');
     }
 
     // Check for existing admin
     const existingAdmin = await User.findOne({ email: adminData.email });
     if (existingAdmin) {
-      console.log(`🔁 Admin user exists: ${adminData.email}, updating password...`);
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(adminData.password, salt);
+      console.log(`🔁 Admin user exists: ${adminData.email}, updating data and sending new reset link...`);
+      const resetPasswordToken = crypto.randomBytes(20).toString('hex');
+      const resetPasswordExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
       const result = await User.updateOne(
         { email: adminData.email },
-        { $set: { password: hashedPassword, name: adminData.name, phone: adminData.phone } }
+        {
+          $set: {
+            name: adminData.name,
+            phone: adminData.phone,
+            resetPasswordToken,
+            resetPasswordExpires,
+            password: undefined, // Clear password to enforce reset
+          },
+        }
       );
 
       if (result.modifiedCount === 0) {
-        console.warn('⚠️ No changes made to admin user (possibly same password or data)');
+        console.warn('⚠️ No changes made to admin user');
       } else {
+        const loginLink = `${process.env.APP_URL}/set-password?token=${resetPasswordToken}`;
+        const msg = {
+          to: adminData.email,
+          from: process.env.FROM_EMAIL,
+          subject: 'Set Up Your Admin Account',
+          html: `
+            <h1>Welcome, ${adminData.name}!</h1>
+            <p>Your admin account has been updated.</p>
+            <p><strong>Email:</strong> ${adminData.email}</p>
+            <p><strong>Role:</strong> Admin</p>
+            <p>Please click the link below to set your password:</p>
+            <a href="${loginLink}">Set Your Password</a>
+            <p>This link will expire in 24 hours.</p>
+            <p><strong>Important:</strong> Do not share this link with anyone.</p>
+          `,
+        };
+
+        try {
+          await sgMail.send(msg);
+          console.log(`Password setup link sent to ${adminData.email}`);
+        } catch (emailError) {
+          console.error('Error sending admin email:', emailError);
+        }
         console.log('✅ Admin user updated successfully');
       }
     } else {
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(adminData.password, salt);
-
-      const admin = new User({
-        ...adminData,
-        password: hashedPassword,
-      });
-
+      const admin = new User(adminData);
       await admin.save();
+      const loginLink = `${process.env.APP_URL}/set-password?token=${adminData.resetPasswordToken}`;
+      const msg = {
+        to: adminData.email,
+        from: process.env.FROM_EMAIL,
+        subject: 'Set Up Your Admin Account',
+        html: `
+          <h1>Welcome, ${adminData.name}!</h1>
+          <p>Your admin account has been created successfully.</p>
+          <p><strong>Email:</strong> ${adminData.email}</p>
+          <p><strong>Role:</strong> Admin</p>
+          <p>Please click the link below to set your password:</p>
+          <a href="${loginLink}">Set Your Password</a>
+          <p>This link will expire in 24 hours.</p>
+          <p><strong>Important:</strong> Do not share this link with anyone.</p>
+        `,
+      };
+
+      try {
+        await sgMail.send(msg);
+        console.log(`Password setup link sent to ${adminData.email}`);
+      } catch (emailError) {
+        console.error('Error sending admin email:', emailError);
+      }
       console.log('✅ Admin user created successfully:', adminData.email);
     }
 
     // Check for existing super admin
     const existingSuperAdmin = await User.findOne({ email: superAdminData.email });
     if (existingSuperAdmin) {
-      console.log(`🔁 Super Admin user exists: ${superAdminData.email}, updating password...`);
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(superAdminData.password, salt);
+      console.log(`🔁 Super Admin user exists: ${superAdminData.email}, updating data and sending new reset link...`);
+      const resetPasswordToken = crypto.randomBytes(20).toString('hex');
+      const resetPasswordExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
       const result = await User.updateOne(
         { email: superAdminData.email },
-        { $set: { password: hashedPassword, name: superAdminData.name, phone: superAdminData.phone } }
+        {
+          $set: {
+            name: superAdminData.name,
+            phone: superAdminData.phone,
+            resetPasswordToken,
+            resetPasswordExpires,
+            password: undefined, // Clear password to enforce reset
+          },
+        }
       );
 
       if (result.modifiedCount === 0) {
-        console.warn('⚠️ No changes made to super admin user (possibly same password or data)');
+        console.warn('⚠️ No changes made to super admin user');
       } else {
+        const loginLink = `${process.env.APP_URL}/set-password?token=${resetPasswordToken}`;
+        const msg = {
+          to: superAdminData.email,
+          from: process.env.FROM_EMAIL,
+          subject: 'Set Up Your Super Admin Account',
+          html: `
+            <h1>Welcome, ${superAdminData.name}!</h1>
+            <p>Your super admin account has been updated.</p>
+            <p><strong>Email:</strong> ${superAdminData.email}</p>
+            <p><strong>Role:</strong> Super Admin</p>
+            <p>Please click the link below to set your password:</p>
+            <a href="${loginLink}">Set Your Password</a>
+            <p>This link will expire in 24 hours.</p>
+            <p><strong>Important:</strong> Do not share this link with anyone.</p>
+          `,
+        };
+
+        try {
+          await sgMail.send(msg);
+          console.log(`Password setup link sent to ${superAdminData.email}`);
+        } catch (emailError) {
+          console.error('Error sending super admin email:', emailError);
+        }
         console.log('✅ Super Admin user updated successfully');
       }
     } else {
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(superAdminData.password, salt);
-
-      const superAdmin = new User({
-        ...superAdminData,
-        password: hashedPassword,
-      });
-
+      const superAdmin = new User(superAdminData);
       await superAdmin.save();
+      const loginLink = `${process.env.APP_URL}/set-password?token=${superAdminData.resetPasswordToken}`;
+      const msg = {
+        to: superAdminData.email,
+        from: process.env.FROM_EMAIL,
+        subject: 'Set Up Your Super Admin Account',
+        html: `
+          <h1>Welcome, ${superAdminData.name}!</h1>
+          <p>Your super admin account has been created successfully.</p>
+          <p><strong>Email:</strong> ${superAdminData.email}</p>
+          <p><strong>Role:</strong> Super Admin</p>
+          <p>Please click the link below to set your password:</p>
+          <a href="${loginLink}">Set Your Password</a>
+          <p>This link will expire in 24 hours.</p>
+          <p><strong>Important:</strong> Do not share this link with anyone.</p>
+        `,
+      };
+
+      try {
+        await sgMail.send(msg);
+        console.log(`Password setup link sent to ${superAdminData.email}`);
+      } catch (emailError) {
+        console.error('Error sending super admin email:', emailError);
+      }
       console.log('✅ Super Admin user created successfully:', superAdminData.email);
     }
   } catch (error) {

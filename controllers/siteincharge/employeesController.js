@@ -175,7 +175,7 @@ export const getEmployee = async (req, res) => {
 
     // Validate pagination parameters for documents
     const docPageNum = parseInt(documentsPage, 10);
-    const docLimitNum = Math.min(parseInt(documentsLimit, 10), 100);
+    const docLimitNum = Math.min(parseInt(documentsLimit, 3), 100);
     if (isNaN(docPageNum) || docPageNum < 1 || isNaN(docLimitNum) || docLimitNum < 1) {
       return res.status(400).json({ message: 'Invalid documents pagination parameters' });
     }
