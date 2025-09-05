@@ -26,7 +26,7 @@ export const getAttendanceReport = async (req, res) => {
       .populate("employee", "name employeeId")
       .populate("location", "name")
       .lean();
-
+    console.log("All Attendance Records:", allRecords);
 
     if (startDate && endDate) {
       // Parse dates in IST
@@ -36,7 +36,7 @@ export const getAttendanceReport = async (req, res) => {
       const end = DateTime.fromFormat(endDate.split("T")[0], "yyyy-MM-dd", {
         zone: "Asia/Kolkata",
       }).endOf("day");
-, end: end.toISO() });
+      console.log("Query Range:", { start: start.toISO(), end: end.toISO() });
       if (!start.isValid || !end.isValid) {
         return res.status(400).json({ message: "Invalid date format" });
       }
@@ -54,7 +54,7 @@ export const getAttendanceReport = async (req, res) => {
       match.location = new mongoose.Types.ObjectId(location);
     }
 
-
+    console.log("Match Object:", match);
 
     // Count total attendance records for pagination metadata
     const totalRecords = await Attendance.countDocuments(match);
@@ -67,7 +67,7 @@ export const getAttendanceReport = async (req, res) => {
       .skip((pageNum - 1) * limitNum)
       .limit(limitNum)
       .lean();
-
+    console.log("Filtered Attendance Records:", attendance);
 
     // Debug specific records (consider removing in production)
     const debugRecords = await Attendance.find({
@@ -78,7 +78,7 @@ export const getAttendanceReport = async (req, res) => {
         ],
       },
     }).lean();
-
+    console.log("Debug Specific Records:", debugRecords);
 
     const summary = await Attendance.aggregate([
       { $match: match },
@@ -106,7 +106,7 @@ export const getAttendanceReport = async (req, res) => {
       },
     });
   } catch (error) {
-
+    console.error("Attendance report error:", error.message);
     res
       .status(500)
       .json({ message: "Server error while fetching attendance report" });
@@ -208,7 +208,7 @@ export const getLeaveReport = async (req, res) => {
       },
     });
   } catch (error) {
-
+    console.error("Leave report error:", error.message);
     res.status(500).json({ message: "Server error while fetching leave report" });
   }
 };
@@ -418,7 +418,7 @@ export const getSalaryReport = async (req, res) => {
       },
     });
   } catch (error) {
-
+    console.error("Salary report error:", error.message);
     res.status(500).json({ message: "Server error while fetching salary report" });
   }
 };
