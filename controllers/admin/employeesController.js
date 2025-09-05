@@ -167,7 +167,6 @@ const checkEmployeeExists = asyncHandler(async (req, res) => {
 // @route   GET /api/admin/employees?page=<page>&limit=<limit>
 // @access  Private/Admin
 const getEmployees = asyncHandler(async (req, res) => {
-  console.log("employees getting", { queryParams: req.query });
   const { location, status, department, search, month, year, page = 1, limit = 10, isDeleted } = req.query;
   let query = {};
   
@@ -180,7 +179,6 @@ const getEmployees = asyncHandler(async (req, res) => {
   if (location && mongoose.Types.ObjectId.isValid(location)) {
     query.location = new mongoose.Types.ObjectId(location);
   } else if (location) {
-    console.warn("Invalid location ID:", location);
   }
   
   if (status && status !== "deleted") query.status = status;
@@ -194,7 +192,6 @@ const getEmployees = asyncHandler(async (req, res) => {
     ];
   }
   
-  console.log("getEmployees query:", query);
 
   const parsedPage = parseInt(page, 10);
   const parsedLimit = parseInt(limit, 10);
@@ -209,7 +206,6 @@ const getEmployees = asyncHandler(async (req, res) => {
 
   const skip = (parsedPage - 1) * parsedLimit;
   const totalEmployees = await Employee.countDocuments(query);
-  console.log("Total employees matching query:", totalEmployees);
 
   // Calculate previous month and year
   const parsedMonth = parseInt(month);
@@ -346,7 +342,6 @@ const getEmployees = asyncHandler(async (req, res) => {
   ];
 
   const employees = await Employee.aggregate(pipeline);
-  console.log("Aggregation result:", employees.length, "employees found");
 
   const totalPages = Math.ceil(totalEmployees / parsedLimit);
 
@@ -368,20 +363,15 @@ const getEmployees = asyncHandler(async (req, res) => {
 const getEmployeeById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    console.log("Fetching employee with ID:", id);
     if (!id || !/^[0-9a-fA-F]{24}$/.test(id)) {
-      console.error("Invalid employee ID format:", id);
       return next(new AppError("Invalid employee ID format", 400));
     }
     const employee = await Employee.findById(id).populate("location");
     if (!employee) {
-      console.error("Employee not found for ID:", id);
       return next(new AppError("Employee not found", 404));
     }
-    console.log("Employee found:", employee.employeeId);
     res.status(200).json(employee);
   } catch (error) {
-    console.error("getEmployeeById error:", error);
     next(new AppError(error.message || "Failed to fetch employee", 500));
   }
 };
@@ -854,7 +844,6 @@ const deactivateEmployee = async (req, res) => {
       employee: updatedEmployee,
     });
   } catch (error) {
-    console.error('Error deactivating employee:', error);
     res.status(500).json({ message: 'Failed to deactivate employee', error: error.message });
   }
 };
@@ -1318,25 +1307,17 @@ const getEmployeeAdvances = asyncHandler(async (req, res) => {
 // @access  Private/Admin
 const addEmployeesFromExcel = async (req, res, next) => {
   try {
-    console.log("Received fields:", Object.keys(req.files || {}));
-    console.log("Received file (excelFile):", req.files?.excelFile?.[0] || "No excel file received");
-    console.log("Received files (documents):", req.files?.documents || []);
+   
 
     if (!req.files || !req.files.excelFile || req.files.excelFile.length === 0) {
       return next(new AppError("No Excel file uploaded", 400));
     }
 
     const excelFile = req.files.excelFile[0];
-    console.log("Excel file details:", {
-      originalname: excelFile.originalname,
-      mimetype: excelFile.mimetype,
-      size: excelFile.size,
-      path: excelFile.path,
-    });
+   
 
     // Handle document uploads
     const documentFiles = req.files.documents || [];
-    console.log("Document files uploaded:", documentFiles.length);
 
     const requiredHeaders = [
       "employeeId",
@@ -1358,10 +1339,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
     const fileExtension = excelFile.originalname.split(".").pop().toLowerCase();
 
     if (fileExtension === "csv") {
-      console.log("Processing as CSV file");
-      const text = await fs.readFile(excelFile.path, "utf8");
-      const cleanedText = text.replace(/^\uFEFF/, "");
-      console.log("CSV content (first 100 chars):", cleanedText.slice(0, 100));
 
       const records = await new Promise((resolve, reject) => {
         const parser = parse({
@@ -1383,28 +1360,23 @@ const addEmployeesFromExcel = async (req, res, next) => {
         parser.end();
       });
 
-      console.log("Raw parsed CSV data:", JSON.stringify(records, null, 2));
       employees = records;
     } else if (["xlsx", "xls"].includes(fileExtension)) {
-      console.log("Processing as Excel file");
       const fileBuffer = await fs.readFile(excelFile.path);
       const workbook = XLSX.read(fileBuffer, { type: "buffer", dateNF: "yyyy-mm-dd" });
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
-      console.log("Sheet name:", sheetName);
       employees = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         blankrows: false,
         raw: false, // Ensure dates are parsed as strings
         dateNF: "yyyy-mm-dd", // Enforce date format
       });
-      console.log("Raw Excel data:", JSON.stringify(employees, null, 2));
 
       if (employees.length < 1) {
         return next(new AppError("Excel file is empty", 400));
       }
       const headers = employees[0].map((h) => h.toString().trim());
-      console.log("Original Excel headers:", headers);
       employees = employees
         .slice(1)
         .map((row) => {
@@ -1421,9 +1393,7 @@ const addEmployeesFromExcel = async (req, res, next) => {
       return next(new AppError("Unsupported file format", 400));
     }
 
-    console.log("Parsed employees:", JSON.stringify(employees, null, 2));
     const fileHeaders = employees.length > 0 ? Object.keys(employees[0]) : [];
-    console.log("Parsed file headers:", fileHeaders);
 
     const missingHeaders = requiredHeaders.filter((h) => !fileHeaders.includes(h));
     if (missingHeaders.length > 0) {
@@ -1447,7 +1417,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
           size: file.size,
         });
       } else {
-        console.warn(`Document ${file.originalname} not associated with any employeeId`);
       }
     });
 
@@ -1602,9 +1571,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
       }
     }
 
-    console.log("Validation errors:", JSON.stringify(errors, null, 2));
-    console.log("Valid employees:", JSON.stringify(validEmployees, null, 2));
-
     if (errors.length > 0) {
       return next(new AppError("Validation errors in file", 400, errors));
     }
@@ -1620,7 +1586,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
       employees: insertedEmployees,
     });
   } catch (error) {
-    console.error("addEmployeesFromExcel error:", error);
     if (error instanceof AppError) {
       return res.status(error.statusCode).json({
         message: error.message,
@@ -1645,36 +1610,29 @@ const getDepartments = asyncHandler(async (req, res) => {
     if (location && mongoose.Types.ObjectId.isValid(location)) {
       query.location = new mongoose.Types.ObjectId(location);
     } else if (location && location !== "all") {
-      console.warn("Invalid location ID:", location);
       return res.status(400).json({ message: "Invalid location ID" });
     }
     const departments = await Employee.distinct("department", query);
-    console.log("Fetched departments:", departments, "for location:", location || "all");
     res.status(200).json({ departments });
   } catch (error) {
-    console.error("Get departments error:", error);
     res.status(500).json({ message: "Failed to fetch departments", error: error.message });
   }
 });
 
 
 const deleteEmployee = asyncHandler(async (req, res) => {
-  console.log("Deleting employee with ID:", req.params.id);
   const employee = await Employee.findById(req.params.id);
   if (!employee) {
-    console.error("Employee not found for ID:", req.params.id);
     res.status(404);
     throw new Error("Employee not found");
   }
   if (employee.isDeleted) {
-    console.error("Employee already deleted:", req.params.id);
     res.status(400);
     throw new Error("Employee is already deleted");
   }
 
   employee.isDeleted = true;
   await employee.save();
-  console.log("Employee deleted successfully:", req.params.id);
   res.status(200).json({ message: "Employee deleted successfully", id: req.params.id });
 });
 
@@ -1686,7 +1644,6 @@ const restoreEmployee = asyncHandler(async (req, res) => {
 
   // Validate ObjectId format
   if (!mongoose.Types.ObjectId.isValid(id)) {
-    console.error("Invalid employee ID:", id);
     res.status(400);
     throw new Error("Invalid employee ID");
   }
@@ -1694,14 +1651,12 @@ const restoreEmployee = asyncHandler(async (req, res) => {
   // Find the employee
   const employee = await Employee.findById(id);
   if (!employee) {
-    console.error("Employee not found for ID:", id);
     res.status(404);
     throw new Error("Employee not found");
   }
 
   // Check if employee is already active (not deleted)
   if (!employee.isDeleted) {
-    console.error("Employee is not deleted:", id);
     res.status(400);
     throw new Error("Employee is not deleted");
   }
@@ -1709,7 +1664,6 @@ const restoreEmployee = asyncHandler(async (req, res) => {
   // Restore the employee
   employee.isDeleted = false;
   await employee.save();
-  console.log("Employee restored successfully:", id);
 
   // Populate necessary fields
   const restoredEmployee = await Employee.findById(id)

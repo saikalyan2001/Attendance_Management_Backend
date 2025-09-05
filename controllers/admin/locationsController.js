@@ -23,7 +23,7 @@ export const getLocations = async (req, res) => {
     );
     res.json(locationsWithCount);
   } catch (error) {
-    console.error('Get locations error:', error.message);
+
     res.status(500).json({ message: 'Server error while fetching locations' });
   }
 };
@@ -129,7 +129,7 @@ export const getPaginatedLocations = async (req, res) => {
       currentPage: adjustedPage,
     });
   } catch (error) {
-    console.error("Get paginated locations error:", error.message);
+
     res.status(500).json({ message: "Server error while fetching paginated locations" });
   }
 };
@@ -153,7 +153,7 @@ export const addLocation = async (req, res) => {
 
     res.status(201).json({ ...location.toObject(), employeeCount: 0 });
   } catch (error) {
-    console.error('Add location error:', error.message);
+
     res.status(500).json({ message: 'Server error while adding location' });
   }
 };
@@ -193,7 +193,7 @@ export const editLocation = async (req, res) => {
     const employeeCount = await Employee.countDocuments({ location: id, isDeleted: false });
     res.json({ ...location.toObject(), employeeCount });
   } catch (error) {
-    console.error('Edit location error:', error.message);
+
     res.status(500).json({ message: 'Server error while editing location' });
   }
 };
@@ -219,7 +219,7 @@ export const deleteLocation = async (req, res) => {
     await Location.deleteOne({ _id: id });
     res.json({ message: 'Location deleted successfully' });
   } catch (error) {
-    console.error('Delete location error:', error.message);
+
     res.status(500).json({ message: 'Server error while deleting location' });
   }
 };

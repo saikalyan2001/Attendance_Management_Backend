@@ -53,7 +53,7 @@ export const login = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Login error:', { error: error.message, body: req.body });
+
     res.status(500).json({ message: 'Unable to process your login request. Please try again in a few minutes.' });
   }
 };
@@ -122,9 +122,9 @@ export const signup = async (req, res) => {
 
     try {
       await sgMail.send(msg);
-      console.log(`Password setup link sent to ${email}`);
+
     } catch (emailError) {
-      console.error('Error sending email:', emailError);
+
       // Log error but don't fail the request
     }
 
@@ -140,7 +140,7 @@ export const signup = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Signup error:', { error: error.message, body: req.body });
+
     res.status(500).json({ message: 'Unable to create account at this time. Please try again in a few minutes.' });
   }
 };
@@ -157,9 +157,9 @@ export const setPassword = async (req, res) => {
     }
 
     // Debug logging
-    console.log('=== SET PASSWORD DEBUG ===');
-    console.log('Received token:', token);
-    console.log('Current time:', new Date());
+
+
+);
 
     const user = await User.findOne({
       resetPasswordToken: token,
@@ -172,18 +172,18 @@ export const setPassword = async (req, res) => {
       });
     }
 
-    console.log('Setting password for user:', user.email);
+
 
     user.password = newPassword;
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     await user.save();
 
-    console.log('Password set successfully for:', user.email);
+
 
     res.json({ message: 'Password set successfully! You can now log in with your credentials.' });
   } catch (error) {
-    console.error('Set password error:', error);
+
     res.status(500).json({ message: 'Unable to set password at this time. Please try again or contact support.' });
   }
 };
@@ -229,18 +229,18 @@ export const forgotPassword = async (req, res) => {
 
     try {
       await sgMail.send(msg);
-      console.log(`Password reset link sent to ${email}`);
+
       res.status(200).json({ 
         message: 'If an account with this email exists, a password reset link has been sent.' 
       });
     } catch (emailError) {
-      console.error('Error sending password reset email:', emailError);
+
       res.status(200).json({ 
         message: 'If an account with this email exists, a password reset link has been sent.' 
       });
     }
   } catch (error) {
-    console.error('Forgot password error:', error);
+
     res.status(500).json({ message: 'Unable to process password reset request. Please try again in a few minutes.' });
   }
 };
@@ -308,9 +308,9 @@ export const createUserBySuperAdmin = async (req, res) => {
 
     try {
       await sgMail.send(msg);
-      console.log(`Password setup link sent to ${email}`);
+
     } catch (emailError) {
-      console.error('Error sending email:', emailError);
+
       // Log error but don't fail the request
     }
 
@@ -325,7 +325,7 @@ export const createUserBySuperAdmin = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('createUserBySuperAdmin error:', { error: error.message, body: req.body });
+
     res.status(500).json({ message: 'Server error during user creation.' });
   }
 };
@@ -383,9 +383,9 @@ export const createSiteIncharge = async (req, res) => {
 
     try {
       await sgMail.send(msg);
-      console.log(`Password setup link sent to ${email}`);
+
     } catch (emailError) {
-      console.error('Error sending email:', emailError);
+
       // Log error but don't fail the request
     }
 
@@ -400,7 +400,7 @@ export const createSiteIncharge = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('createSiteIncharge error:', { error: error.message, body: req.body });
+
     res.status(500).json({ message: 'Server error during site incharge creation.' });
   }
 };
@@ -460,9 +460,9 @@ export const createSuperAdmin = async (req, res) => {
 
     try {
       await sgMail.send(msg);
-      console.log(`Password setup link sent to ${email}`);
+
     } catch (emailError) {
-      console.error('Error sending email:', emailError);
+
       // Log error but don't fail the request
     }
 
@@ -477,7 +477,7 @@ export const createSuperAdmin = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('createSuperAdmin error:', { error: error.message, body: req.body });
+
     res.status(500).json({ message: 'Server error during super admin creation.' });
   }
 };
@@ -486,7 +486,7 @@ export const logout = async (req, res) => {
   try {
     res.json({ message: 'Logged out successfully.' });
   } catch (error) {
-    console.error('Logout error:', error);
+
     res.status(500).json({ message: 'Server error during logout.' });
   }
 };
@@ -496,7 +496,7 @@ export const getLocations = async (req, res) => {
     const locations = await Location.find().lean();
     res.json(locations);
   } catch (error) {
-    console.error('Get locations error:', error);
+
     res.status(500).json({ message: 'Server error fetching locations.' });
   }
 };
@@ -517,7 +517,7 @@ export const getMe = async (req, res) => {
       profilePicture: user.profilePicture || null,
     });
   } catch (error) {
-    console.error('Get me error:', error);
+
     res.status(500).json({ message: 'Server error fetching user data.' });
   }
 };

@@ -38,7 +38,7 @@ const __dirname = path.dirname(__filename);
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'Uploads', 'documents');
 fs.mkdir(uploadsDir, { recursive: true }).catch((err) => {
-  console.error('Failed to create uploads directory:', err.message);
+
 });
 
 // Middleware
@@ -47,12 +47,12 @@ app.use(express.json());
 app.use('/uploads', protect, restrictTo('admin', 'siteincharge', 'super_admin'), async (req, res, next) => {
   const decodedPath = decodeURIComponent(req.path);
   const filePath = path.join(__dirname, 'Uploads', 'documents', decodedPath.replace('/documents/', ''));
-  console.log('Attempting to serve file:', filePath);
+
   try {
     await fs.access(filePath);
     express.static(uploadsDir)(req, res, next);
   } catch (err) {
-    console.error('File access error:', err.message, 'Path:', filePath);
+
     res.status(404).json({ message: 'File not found' });
   }
 });
@@ -79,28 +79,10 @@ app.use('/api/superadmin', superAdminAttendanceRoutes); // Mount superadmin empl
 app.use('/api/superadmin', superAdminReportsRoutes); // Mount superadmin employees routes
 
 // Error handling middleware
-// ✅ NEW (Use this instead)
-// Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Server error:', {
-    message: err.message,
-    stack: err.stack,
-    statusCode: err.statusCode || err.status || 500,
-    url: req.url,
-    method: req.method
-  });
-  
-  // Send the actual error message instead of generic one
-  const statusCode = err.statusCode || err.status || 500;
-  const message = err.message || 'Internal Server Error';
-  
-  res.status(statusCode).json({
-    message: message,
-    errors: err.errors || [], // For Excel validation errors with row details
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  });
-});
 
+  res.status(500).json({ message: 'Something went wrong!' });
+});
 
 // Start server and seed admin
 const startServer = async () => {
@@ -109,12 +91,12 @@ const startServer = async () => {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
-    console.log('MongoDB connected');
+
     await seedAdmin();
     const PORT = process.env.PORT || 5000;
     app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
   } catch (err) {
-    console.error('Failed to start server:', err.message);
+
     process.exit(1);
   }
 };

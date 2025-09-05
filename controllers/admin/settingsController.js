@@ -15,7 +15,7 @@ export const getSettings = asyncHandler(async (req, res) => {
     }
     res.status(200).json(settings);
   } catch (error) {
-    console.error('Get settings error:', error);
+
     res.status(500).json({ message: 'Could not load system settings due to a server issue. Please try again later.' });
   }
 });
@@ -60,7 +60,7 @@ export const updateSettings = asyncHandler(async (req, res) => {
 
     res.json(settings);
   } catch (error) {
-    console.error('Update settings error:', error);
+
     res.status(500).json({ message: 'Could not update settings due to a server issue. Please try again later.' });
   }
 });
@@ -121,10 +121,10 @@ export const updateEmployeeLeaves = asyncHandler(async (req, res) => {
           employee.paidLeaves.carriedForward = 0;
           await employee.save();
 
-          console.log(`Updated employee ${employee.employeeId}: ${employee.paidLeaves.available} leaves`);
+
           return employee;
         } catch (error) {
-          console.error(`Failed to update employee ${employee.employeeId}:`, error);
+
           return employee;
         }
       })
@@ -135,7 +135,7 @@ export const updateEmployeeLeaves = asyncHandler(async (req, res) => {
       employeeCount: updatedEmployees.length,
     });
   } catch (error) {
-    console.error('Update employee leaves error:', error);
+
     res.status(500).json({ message: 'Could not update employee leave balances due to a server issue. Please try again later.' });
   }
 });

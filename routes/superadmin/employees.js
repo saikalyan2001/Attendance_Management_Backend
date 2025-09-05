@@ -34,11 +34,11 @@ router.use(restrictTo("super_admin"));
 
 const multerErrorHandler = (err, req, res, next) => {
   if (err instanceof multer.MulterError) {
-    console.error("Multer error:", err.message, err.field);
+
     return res.status(400).json({ message: `Multer error: ${err.message}`, field: err.field });
   }
   if (err) {
-    console.error("File upload error:", err.message);
+
     return res.status(400).json({ message: err.message });
   }
   next();

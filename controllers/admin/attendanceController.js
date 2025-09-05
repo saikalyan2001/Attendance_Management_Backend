@@ -71,7 +71,7 @@ async function correctMonthlyLeaves(employee, year, month, session) {
       seen.add(key);
       uniqueLeaves.push(ml);
     } else {
-      console.warn(`Duplicate leave entry for ${employee._id} in ${ml.month}/${ml.year}`);
+
     }
   }
   employee.monthlyLeaves = uniqueLeaves;
@@ -226,7 +226,7 @@ async function executeWithRetry(operation, maxRetries = 3) {
       session.endSession();
       if (error.codeName === 'WriteConflict' && retries < maxRetries - 1) {
         retries++;
-        console.warn(`Retrying transaction due to write conflict. Attempt ${retries + 1}/${maxRetries}`);
+
         await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, retries)));
         continue;
       }
@@ -483,11 +483,6 @@ export const bulkMarkAttendance = async (req, res) => {
       attendanceIds: result.attendanceIds,
     });
   } catch (error) {
-    console.error('Bulk mark attendance error:', {
-      message: error.message,
-      stack: error.stack,
-      body: JSON.stringify(req.body, null, 2),
-    });
     if (error.code === 11000) {
       return res.status(409).json({
         message: 'Attendance already marked for some employees',
@@ -962,11 +957,6 @@ export const getAttendance = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('getAttendance error:', {
-      message: error.message,
-      stack: error.stack,
-      query: req.query,
-    });
     res.status(500).json({ message: `Server error while fetching attendance: ${error.message}` });
   }
 };
@@ -1048,7 +1038,7 @@ export const getAttendanceRequests = async (req, res) => {
       requests.map(async (request) => {
         // Check if employee or location is null
         if (!request.employee || !request.location) {
-          console.warn(`Skipping request with missing employee or location: ${request._id}`);
+
           return {
             ...request,
             currentStatus: 'N/A',
@@ -1080,11 +1070,6 @@ export const getAttendanceRequests = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Get attendance requests error:', {
-      message: error.message,
-      stack: error.stack,
-      query: req.query,
-    });
     res.status(500).json({ message: `Server error while fetching attendance requests: ${error.message}` });
   }
 };

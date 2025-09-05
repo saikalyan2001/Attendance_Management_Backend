@@ -23,7 +23,7 @@ const executeWithRetry = async (operation, maxRetries = 3) => {
     } catch (error) {
       lastError = error;
       if (error.name === "MongoServerError" && error.code === 112) {
-        console.warn(`Write conflict detected, retrying attempt ${attempt}/${maxRetries}`);
+
         if (attempt === maxRetries) {
           throw error;
         }
@@ -173,7 +173,7 @@ export const calculateSalaryImpact = async (req, res) => {
 
     res.status(200).json({ salaryCalculations });
   } catch (error) {
-    console.error("Error calculating salary impact:", error);
+
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -331,11 +331,6 @@ export const markBulkAttendance = async (req, res) => {
 
     return result;
   } catch (error) {
-    console.error('Bulk mark attendance error:', {
-      message: error.message,
-      stack: error.stack,
-      body: JSON.stringify(req.body, null, 2),
-    });
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
@@ -493,7 +488,7 @@ export const markAttendance = async (req, res) => {
       throw error;
     }
   }).catch((error) => {
-    console.error("Error marking attendance:", error);
+
     res.status(500).json({ message: "Server error", error: error.message });
   });
 };
@@ -626,7 +621,7 @@ export const undoAttendance = async (req, res) => {
       throw error;
     }
   }).catch((error) => {
-    console.error("Error undoing attendance:", error);
+
     res.status(500).json({ message: "Server error" });
   });
 };
@@ -745,7 +740,7 @@ export const requestAttendanceEdit = async (req, res) => {
       throw error;
     }
   }).catch((error) => {
-    console.error("Error requesting attendance edit:", error);
+
     res.status(500).json({ message: "Server error" });
   });
 };
@@ -799,10 +794,6 @@ export const getAttendance = async (req, res) => {
         $gte: startDate.toISOString(),
         $lte: endDate.toISOString(),
       };
-      console.log("Attendance query date range:", {
-        start: startDate.toISOString(),
-        end: endDate.toISOString(),
-      }); // Debug date range
     }
 
     if (status && status !== "all") {
@@ -812,7 +803,7 @@ export const getAttendance = async (req, res) => {
       query.status = status;
     }
 
-    console.log("Attendance query:", query); // Debug query
+ // Debug query
 
     // Fetch total count for pagination
     const total = await Attendance.countDocuments(query);
@@ -825,7 +816,7 @@ export const getAttendance = async (req, res) => {
       .limit(limitNum)
       .lean();
 
-    console.log("Found records:", attendance.length); // Debug results
+ // Debug results
 
     res.status(200).json({
       attendance,
@@ -837,7 +828,7 @@ export const getAttendance = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error fetching attendance:", error);
+
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -883,14 +874,7 @@ export const getMonthlyAttendance = async (req, res) => {
     const dateOnlyStr = startDate.toISOString().split("T")[0];
     const endDateOnlyStr = endDate.toISOString().split("T")[0] + "T23:59:59.999+05:30";
 
-    console.log("Querying monthly attendance with:", {
-      date: {
-        $gte: `${dateOnlyStr}T00:00:00+05:30`,
-        $lte: endDateOnlyStr,
-      },
-      location,
-      isDeleted: isDeleted === "false" ? false : true,
-    });
+  
 
     // Fetch total count of employees for pagination
     const totalEmployees = await Employee.countDocuments({
@@ -924,7 +908,7 @@ export const getMonthlyAttendance = async (req, res) => {
       .sort({ date: -1, updatedAt: -1 })
       .lean();
 
-    console.log("Found employees:", employees.length, "Found attendance records:", attendance.length);
+
 
     // Structure response to include employees and their attendance
     const data = employees.map((employee) => ({
@@ -944,7 +928,7 @@ export const getMonthlyAttendance = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error fetching monthly attendance:", error);
+
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -1037,10 +1021,6 @@ export const getEmployeeAttendance = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Get employee attendance error:", {
-      message: error.message,
-      stack: error.stack,
-    });
     res.status(500).json({ message: "Server error while fetching employee attendance" });
   }
 };
@@ -1048,14 +1028,7 @@ export const getEmployeeAttendance = async (req, res) => {
 export const getAttendanceEditRequests = async (req, res) => {
   try {
     const { location, page = 1, limit = 3, status } = req.query;
-    console.log("getAttendanceEditRequests:", {
-      user: req.user.email,
-      role: req.user.role,
-      location,
-      page,
-      limit,
-      status,
-    });
+  
 
     if (!location || !mongoose.isValidObjectId(location)) {
       return res.status(400).json({ message: "Valid location ID is required" });
@@ -1092,7 +1065,7 @@ export const getAttendanceEditRequests = async (req, res) => {
 
     // Debug: Log all AttendanceRequest documents for the location
     const allRequests = await AttendanceRequest.find({ location: new mongoose.Types.ObjectId(location) }).lean();
-    console.log("All AttendanceRequest documents for location:", allRequests);
+
 
     // Fetch total count for pagination
     const total = await AttendanceRequest.countDocuments(query);
@@ -1105,12 +1078,12 @@ export const getAttendanceEditRequests = async (req, res) => {
       .limit(limitNum)
       .lean();
 
-    console.log("Found attendance edit requests:", requests.length);
+
 
     const requestsWithStatus = await Promise.all(
       requests.map(async (request) => {
         if (!request.employee || !request.employee._id) {
-          console.warn(`Invalid employee reference in AttendanceRequest: ${request._id}`);
+
           return {
             ...request,
             employee: { name: "Unknown", employeeId: "N/A" }, // Fallback for missing employee
@@ -1144,10 +1117,6 @@ export const getAttendanceEditRequests = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Get attendance edit requests error:", {
-      message: error.message,
-      stack: error.stack,
-    });
     res.status(500).json({
       message: "Server error while fetching attendance edit requests",
     });

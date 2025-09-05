@@ -8,7 +8,7 @@ export const getAllUsers = async (req, res) => {
       .populate('locations');
     res.json(users);
   } catch (error) {
-    console.error('getAllUsers error:', error);
+
     res.status(500).json({ message: 'Server error fetching users.' });
   }
 };
@@ -49,7 +49,7 @@ export const updateUser = async (req, res) => {
     const populatedUser = await User.findById(id).populate('locations').select('-password');
     res.json(populatedUser);
   } catch (error) {
-    console.error('updateUser error:', error);
+
     res.status(500).json({ message: 'Server error updating user.' });
   }
 };
@@ -69,7 +69,7 @@ export const deleteUser = async (req, res) => {
     await user.deleteOne();
     res.json({ message: 'User deleted successfully.' });
   } catch (error) {
-    console.error('deleteUser error:', error);
+
     res.status(500).json({ message: 'Server error deleting user.' });
   }
 };
@@ -77,7 +77,7 @@ export const deleteUser = async (req, res) => {
 export const fetchSuperAdminDashboard = async (req, res) => {
   try {
     const { date } = req.query;
-    console.log('fetchSuperAdminDashboard: Requested date:', date);
+
 
     let targetDate = new Date();
     if (date) {
@@ -87,7 +87,7 @@ export const fetchSuperAdminDashboard = async (req, res) => {
       }
     }
     const dateString = targetDate.toISOString().split('T')[0];
-    console.log('fetchSuperAdminDashboard: Querying for date string:', dateString);
+
 
     const totalUsers = await User.countDocuments({ role: { $in: ['admin', 'siteincharge'] } });
     const totalLocations = await Location.countDocuments({ isDeleted: false });
@@ -121,7 +121,7 @@ export const fetchSuperAdminDashboard = async (req, res) => {
       { $limit: 10 },
     ]);
 
-    console.log('fetchSuperAdminDashboard: recentActivity:', recentActivity);
+
 
     res.json({
       totalUsers,
@@ -133,7 +133,7 @@ export const fetchSuperAdminDashboard = async (req, res) => {
       recentActivity,
     });
   } catch (error) {
-    console.error('fetchSuperAdminDashboard error:', error);
+
     res.status(500).json({ message: 'Server error fetching dashboard data.' });
   }
 };

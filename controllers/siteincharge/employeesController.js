@@ -17,10 +17,6 @@ const __dirname = path.dirname(__filename);
 
 const getUserLocationIds = (user) => {
   if (!user || !Array.isArray(user.locations)) {
-    console.warn('getUserLocationIds: user.locations is not an array or user is undefined', {
-      user: user ? user._id : 'undefined',
-      locations: user?.locations,
-    });
     return [];
   }
   const locationIds = user.locations
@@ -31,7 +27,6 @@ const getUserLocationIds = (user) => {
       } else if (mongoose.isValidObjectId(loc)) {
         return loc.toString();
       }
-      console.warn('getUserLocationIds: Invalid location entry', { loc });
       return null;
     })
     .filter((id) => id !== null); // Remove invalid entries
@@ -159,16 +154,13 @@ export const getEmployees = async (req, res) => {
     } catch (error) {
       if (error.code === 112 && error.errorLabels?.includes('TransientTransactionError')) {
         retries++;
-        console.warn(`WriteConflict in getEmployees, retrying (${retries}/${maxRetries})`);
         if (retries === maxRetries) {
-          console.error("Max retries reached for getEmployees:", error);
           return res.status(500).json({ message: "Server error", error: error.message });
         }
         // Exponential backoff: wait 100ms * 2^retries
         await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, retries)));
         continue;
       }
-      console.error("Error fetching employees:", error);
       return res.status(500).json({ message: "Server error", error: error.message });
     }
   }
@@ -276,17 +268,6 @@ export const getEmployee = async (req, res) => {
 
       await session.commitTransaction();
 
-      console.log('Returning employee:', {
-        _id: filteredEmployee._id,
-        employeeId: filteredEmployee.employeeId,
-        name: filteredEmployee.name,
-        monthlyLeaves: filteredEmployee.monthlyLeaves,
-        documentsCount: filteredEmployee.documents.length,
-        documentsPagination: filteredEmployee.documentsPagination,
-        advancesCount: filteredEmployee.advances.length,
-        advancesPagination: filteredEmployee.advancesPagination,
-      });
-
       res.set('Cache-Control', req.headers['cache-control'] || 'no-cache');
       res.json({ employee: filteredEmployee });
     } catch (error) {
@@ -296,7 +277,6 @@ export const getEmployee = async (req, res) => {
       session.endSession();
     }
   } catch (error) {
-    console.error('Get employee error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -362,7 +342,6 @@ export const getAttendance = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Get attendance error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -439,7 +418,6 @@ export const getSettings = async (req, res) => {
     }
     res.json(settings);
   } catch (error) {
-    console.error('Get settings error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -576,7 +554,6 @@ if (existingEmployee) {
       .lean();
     res.status(201).json(populatedEmployee);
   } catch (error) {
-    console.error('Register employee error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -733,7 +710,6 @@ export const editEmployee = async (req, res) => {
       .lean();
     res.json(populatedEmployee);
   } catch (error) {
-    console.error('Edit employee error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -843,7 +819,6 @@ export const rejoinEmployee = async (req, res) => {
       .lean();
     res.json(populatedEmployee);
   } catch (error) {
-    console.error('Rejoin employee error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -897,7 +872,6 @@ export const transferEmployee = async (req, res) => {
     await employee.populate('location');
     res.status(200).json(employee);
   } catch (error) {
-    console.error('Transfer employee error:', error.message);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -946,7 +920,6 @@ export const uploadDocument = async (req, res) => {
       .lean();
     res.json(populatedEmployee);
   } catch (error) {
-    console.error('Upload document error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -980,7 +953,6 @@ export const deleteEmployee = async (req, res) => {
 
     res.json({ id: employee._id.toString(), message: 'Employee deleted successfully' });
   } catch (error) {
-    console.error('Delete employee error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
@@ -1018,7 +990,6 @@ export const restoreEmployee = async (req, res) => {
 
     res.json({ employee: populatedEmployee, message: 'Employee restored successfully' });
   } catch (error) {
-    console.error('Restore employee error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
@@ -1065,7 +1036,6 @@ export const deactivateEmployee = async (req, res) => {
       .lean();
     res.json(populatedEmployee);
   } catch (error) {
-    console.error('Deactivate employee error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -1075,20 +1045,13 @@ export const getLocations = async (req, res) => {
     const userLocationIds = getUserLocationIds(req.user);
     
     if (userLocationIds.length === 0) {
-      console.warn('getLocations: No valid locations assigned to user', {
-        userId: req.user?._id || 'unknown',
-        attemptedLocationIds: user?.locations,
-      });
       return res.status(200).json([]);
     }
 
     // Validate ObjectIds before querying
     const validLocationIds = userLocationIds.filter((id) => mongoose.isValidObjectId(id));
     if (validLocationIds.length < userLocationIds.length) {
-      console.warn('getLocations: Some location IDs are invalid', {
-        userId: req.user?._id || 'unknown',
-        invalidIds: userLocationIds.filter((id) => !mongoose.isValidObjectId(id)),
-      });
+     
     }
 
     if (validLocationIds.length === 0) {
@@ -1099,20 +1062,11 @@ export const getLocations = async (req, res) => {
       .select('name address')
       .lean();
 
-    console.log('Fetched locations:', {
-      count: locations.length,
-      locationIds: validLocationIds,
-      userId: req.user?._id || 'unknown',
-    });
+  
 
     res.json(locations);
   } catch (error) {
-    console.error('Get locations error:', {
-      message: error.message,
-      stack: error.stack,
-      userId: req.user?._id || 'unknown',
-      attemptedLocationIds: user?.locations,
-    });
+   
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -1147,7 +1101,6 @@ export const getEmployeeHistory = async (req, res) => {
       employmentHistory: employee.employmentHistory || [],
     });
   } catch (error) {
-    console.error('Get employee history error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -1224,7 +1177,6 @@ export const updateEmployeeAdvance = async (req, res) => {
       .lean();
     res.json(populatedEmployee);
   } catch (error) {
-    console.error('Update employee advance error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -1233,9 +1185,6 @@ export const addEmployeesFromExcel = expressAsyncHandler(async (req, res, next) 
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
-
-    console.log('Received fields:', Object.keys(req.files || {}));
-    console.log('Received file (excelFile):', req.file || 'No excel file received');
 
     if (!req.file) {
       throw new AppError('No Excel file uploaded', 400);
@@ -1259,7 +1208,6 @@ export const addEmployeesFromExcel = expressAsyncHandler(async (req, res, next) 
       return map;
     }, {});
 
-    console.log('Location map:', locationMap);
 
     const requiredHeaders = [
       'employeeId',
@@ -1281,10 +1229,8 @@ export const addEmployeesFromExcel = expressAsyncHandler(async (req, res, next) 
     const fileExtension = excelFile.originalname.split('.').pop().toLowerCase();
 
     if (fileExtension === 'csv') {
-      console.log('Processing as CSV file');
       const text = await fs.readFile(excelFile.path, 'utf8');
       const cleanedText = text.replace(/^\uFEFF/, '');
-      console.log('CSV content (first 100 chars):', cleanedText.slice(0, 100));
 
       const records = await new Promise((resolve, reject) => {
         const parser = parse({
@@ -1306,28 +1252,23 @@ export const addEmployeesFromExcel = expressAsyncHandler(async (req, res, next) 
         parser.end();
       });
 
-      console.log('Raw parsed CSV data:', JSON.stringify(records, null, 2));
       employees = records;
     } else if (['xlsx', 'xls'].includes(fileExtension)) {
-      console.log('Processing as Excel file');
       const fileBuffer = await fs.readFile(excelFile.path);
       const workbook = XLSX.read(fileBuffer, { type: 'buffer', dateNF: 'yyyy-mm-dd' });
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
-      console.log('Sheet name:', sheetName);
       employees = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         blankrows: false,
         raw: false,
         dateNF: 'yyyy-mm-dd',
       });
-      console.log('Raw Excel data:', JSON.stringify(employees, null, 2));
 
       if (employees.length < 1) {
         throw new AppError('Excel file is empty', 400);
       }
       const headers = employees[0].map((h) => h.toString().trim().toLowerCase());
-      console.log('Original Excel headers:', headers);
       employees = employees
         .slice(1)
         .map((row) => {
@@ -1347,9 +1288,7 @@ export const addEmployeesFromExcel = expressAsyncHandler(async (req, res, next) 
       throw new AppError('Unsupported file format', 400);
     }
 
-    console.log('Parsed employees:', JSON.stringify(employees, null, 2));
     const fileHeaders = employees.length > 0 ? Object.keys(employees[0]).map(h => h.toLowerCase()) : [];
-    console.log('Parsed file headers:', fileHeaders);
 
     const missingHeaders = requiredHeaders.filter((h) => !fileHeaders.includes(h.toLowerCase()));
     if (missingHeaders.length > 0) {
@@ -1521,9 +1460,6 @@ if (existingEmployee) {
       }
     }
 
-    console.log('Validation errors:', JSON.stringify(errors, null, 2));
-    console.log('Valid employees:', JSON.stringify(validEmployees, null, 2));
-
     if (errors.length > 0) {
       throw new AppError('Validation errors in file', 400, errors);
     }
@@ -1546,7 +1482,6 @@ if (existingEmployee) {
     });
   } catch (error) {
     await session.abortTransaction();
-    console.error('addEmployeesFromExcel error:', error);
     if (error instanceof AppError) {
       return res.status(error.status || 500).json({
         message: error.message,
@@ -1558,7 +1493,6 @@ if (existingEmployee) {
     session.endSession();
     if (req.file?.path) {
       await fs.unlink(req.file.path).catch((err) => {
-        console.error(`Failed to delete file ${req.file.path}:`, err);
       });
     }
   }
