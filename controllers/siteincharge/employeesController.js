@@ -56,7 +56,7 @@ export const getEmployees = async (req, res) => {
 
   while (retries < maxRetries) {
     try {
-      const { location, status, page = 1, limit = 5, month, year, isDeleted } = req.query;
+      const { location, status, page = 1, limit = 5, month, year, isDeleted, search } = req.query;
 
       // Validate pagination parameters
       const pageNum = parseInt(page, 10);
@@ -78,6 +78,16 @@ export const getEmployees = async (req, res) => {
       } else {
         query.isDeleted = isDeleted === 'true' ? true : false; // Default to isDeleted filter if provided
       }
+
+      if (req.query.department) query.department = req.query.department;
+
+      if (search && search.trim() !== '') {
+      const regex = new RegExp(search.trim(), 'i'); // case-insensitive
+      query.$or = [
+        { name:       { $regex: regex } },
+        { employeeId: { $regex: regex } },
+      ];
+     }
 
       const userLocationIds = getUserLocationIds(req.user);
       if (location && !userLocationIds.includes(location)) {
@@ -475,9 +485,31 @@ export const registerEmployee = async (req, res) => {
       return res.status(400).json({ message: 'Invalid join date' });
     }
 
-    const existingEmployee = await Employee.findOne({
-      $or: [{ employeeId }, { email }],
+    // In your siteincharge registerEmployee function
+const existingEmployee = await Employee.findOne({
+  $or: [{ employeeId }, { email }],
+});
+if (existingEmployee) {
+  // 🔥 FIX: Check which field specifically has the duplicate
+  if (existingEmployee.employeeId === employeeId) {
+    return res.status(400).json({ 
+      message: 'EmployeeId already exists',
+      field: 'employeeId'
     });
+  }
+  if (existingEmployee.email === email) {
+    return res.status(400).json({ 
+      message: 'Email already exists',
+      field: 'email'
+    });
+  }
+  // Fallback (shouldn't happen, but just in case)
+  return res.status(400).json({ 
+    message: 'Employee ID or email already exists'
+  });
+}
+
+   
     if (existingEmployee) {
       return res.status(400).json({ message: 'Employee ID or email already exists' });
     }
@@ -1411,20 +1443,32 @@ export const addEmployeesFromExcel = expressAsyncHandler(async (req, res, next) 
         }
 
         // Check for duplicates
-        const existingEmployee = await Employee.findOne({
-          $or: [
-            { employeeId: emp.employeeId },
-            { email: emp.email.toLowerCase() },
-            { phone: emp.phone },
-          ],
-        }).session(session);
-        if (existingEmployee) {
-          errors.push({
-            row,
-            message: `Duplicate found: ${existingEmployee.employeeId === emp.employeeId ? 'Employee ID' : existingEmployee.email === emp.email.toLowerCase() ? 'Email' : 'Phone'} already exists`,
-          });
-          continue;
-        }
+      // Find this part and update it too:
+const existingEmployee = await Employee.findOne({
+  $or: [
+    { employeeId: emp.employeeId },
+    { email: emp.email.toLowerCase() },
+    { phone: emp.phone },
+  ],
+}).session(session);
+if (existingEmployee) {
+  // 🔥 UPDATE: Make this more specific
+  let duplicateField = '';
+  if (existingEmployee.employeeId === emp.employeeId) {
+    duplicateField = 'Employee ID';
+  } else if (existingEmployee.email === emp.email.toLowerCase()) {
+    duplicateField = 'Email';
+  } else if (existingEmployee.phone === emp.phone) {
+    duplicateField = 'Phone';
+  }
+  
+  errors.push({
+    row,
+    message: `${duplicateField} already exists`,
+  });
+  continue;
+}
+
 
         const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
         const paidLeavesPerMonth = settings.paidLeavesPerYear / 12;

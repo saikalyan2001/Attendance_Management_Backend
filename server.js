@@ -79,10 +79,28 @@ app.use('/api/superadmin', superAdminAttendanceRoutes); // Mount superadmin empl
 app.use('/api/superadmin', superAdminReportsRoutes); // Mount superadmin employees routes
 
 // Error handling middleware
+// ✅ NEW (Use this instead)
+// Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Server error:', err.stack);
-  res.status(500).json({ message: 'Something went wrong!' });
+  console.error('Server error:', {
+    message: err.message,
+    stack: err.stack,
+    statusCode: err.statusCode || err.status || 500,
+    url: req.url,
+    method: req.method
+  });
+  
+  // Send the actual error message instead of generic one
+  const statusCode = err.statusCode || err.status || 500;
+  const message = err.message || 'Internal Server Error';
+  
+  res.status(statusCode).json({
+    message: message,
+    errors: err.errors || [], // For Excel validation errors with row details
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
 });
+
 
 // Start server and seed admin
 const startServer = async () => {

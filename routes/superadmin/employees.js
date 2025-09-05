@@ -24,6 +24,7 @@ import {
 import { protect, restrictTo } from "../../middleware/authMiddleware.js";
 import upload from "../../utils/multer.js";
 import multer from "multer";
+import { getAttendance } from "../../controllers/admin/attendanceController.js";
 
 const router = express.Router();
 
@@ -62,6 +63,7 @@ router.put("/employees/:id/advance", updateEmployeeAdvance);
 router.get("/employees/:id/advances", getEmployeeAdvances);
 router.put("/employees/:id/deactivate", deactivateEmployee);
 router.delete("/employees/:id", deleteEmployee);
+router.get("/employees/:id/attendance", getAttendance);
 router.get("/employees/:id/attendance", getEmployeeAttendance);
 router.put("/employees/:id/transfer", transferEmployee);
 router.put("/employees/:id/rejoin", rejoinEmployee);

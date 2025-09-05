@@ -168,20 +168,32 @@ const checkEmployeeExists = asyncHandler(async (req, res) => {
 // @access  Private/Admin
 const getEmployees = asyncHandler(async (req, res) => {
   console.log("employees getting", { queryParams: req.query });
-  const { location, status, department, month, year, page = 1, limit = 10, isDeleted } = req.query;
+  const { location, status, department, search, month, year, page = 1, limit = 10, isDeleted } = req.query;
   let query = {};
+  
   if (isDeleted !== undefined) {
     query.isDeleted = isDeleted === "true";
   } else {
     query.isDeleted = false;
   }
+  
   if (location && mongoose.Types.ObjectId.isValid(location)) {
     query.location = new mongoose.Types.ObjectId(location);
   } else if (location) {
     console.warn("Invalid location ID:", location);
   }
+  
   if (status && status !== "deleted") query.status = status;
   if (department) query.department = department;
+  
+  // Add search functionality
+  if (search) {
+    query.$or = [
+      { name: { $regex: search, $options: "i" } },
+      { employeeId: { $regex: search, $options: "i" } }
+    ];
+  }
+  
   console.log("getEmployees query:", query);
 
   const parsedPage = parseInt(page, 10);
@@ -207,8 +219,6 @@ const getEmployees = asyncHandler(async (req, res) => {
   const prevMonth = prevMonthDate.getMonth() + 1;
   const prevYear = prevMonthDate.getFullYear();
 
-
-  
   // Get settings for paid leaves
   const settings = await Settings.findOne();
   const paidLeavesPerMonth = settings ? settings.paidLeavesPerYear / 12 : 2;
@@ -350,6 +360,7 @@ const getEmployees = asyncHandler(async (req, res) => {
     },
   });
 });
+
 
 // @desc    Get a single employee by ID with paginated documents
 // @route   GET /api/admin/employees/:id?page=<page>&limit=<limit>

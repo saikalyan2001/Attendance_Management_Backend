@@ -838,7 +838,9 @@ export const editAttendance = async (req, res) => {
 
 export const getAttendance = async (req, res) => {
   try {
-    const { employeeId, month, year, location, date, status, page = 1, limit = 5 } = req.query;
+    // ✅ FIX: Get employeeId from URL params, not query
+    const { id: employeeId } = req.params;  // Changed from req.query.employeeId
+    const { month, year, location, date, status, page = 1, limit = 5 } = req.query;
 
     const parsedPage = parseInt(page, 10);
     const parsedLimit = parseInt(limit, 10);
@@ -891,6 +893,7 @@ export const getAttendance = async (req, res) => {
       match.status = status;
     }
 
+    // ✅ FIX: Always filter by employeeId when it's provided via URL params
     if (employeeId) {
       if (!mongoose.Types.ObjectId.isValid(employeeId)) {
         return res.status(400).json({ message: 'Invalid employee ID format' });
@@ -902,30 +905,21 @@ export const getAttendance = async (req, res) => {
       match.employee = new mongoose.Types.ObjectId(employeeId);
     }
 
-    const uniqueEmployees = await Attendance.distinct('employee', match).exec();
-    for (const empId of uniqueEmployees) {
-      const employee = await Employee.findById(empId);
-      if (employee) {
-        await correctMonthlyLeaves(employee, parseInt(year), parseInt(month), null);
-      }
+    // ✅ FIX: Use single-employee pagination logic since we always have employeeId from URL
+    const employee = await Employee.findById(employeeId);
+    if (employee) {
+      await correctMonthlyLeaves(employee, parseInt(year), parseInt(month), null);
     }
 
-    const totalItems = uniqueEmployees.length;
+    const totalItems = await Attendance.countDocuments(match);
     const totalPages = Math.ceil(totalItems / parsedLimit);
     const skip = (parsedPage - 1) * parsedLimit;
-    const paginatedEmployeeIds = uniqueEmployees.slice(skip, skip + parsedLimit);
 
-    const attendance = await Attendance.find({
-      ...match,
-      employee: { $in: paginatedEmployeeIds },
-    })
+    const attendance = await Attendance.find(match)
       .populate({
         path: 'employee',
         select: 'employeeId name monthlyLeaves',
-        match: {
-          _id: { $in: paginatedEmployeeIds },
-          isDeleted: { $ne: true },
-        },
+        match: { isDeleted: { $ne: true } },
         options: { lean: true },
       })
       .populate({
@@ -933,7 +927,9 @@ export const getAttendance = async (req, res) => {
         select: 'name',
         options: { lean: true },
       })
-      .sort({ date: 1 })
+      .sort({ date: -1 }) // Sort by date descending
+      .skip(skip)
+      .limit(parsedLimit)
       .lean();
 
     const formattedAttendance = attendance
@@ -974,6 +970,9 @@ export const getAttendance = async (req, res) => {
     res.status(500).json({ message: `Server error while fetching attendance: ${error.message}` });
   }
 };
+
+
+
 
 export const getAttendanceRequests = async (req, res) => {
   try {
