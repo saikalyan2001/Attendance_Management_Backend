@@ -20,3 +20,5 @@ Thumbs.db
 config/service-account-key.json
 
 getRefreshToken.js
+
+scripts/getRefreshToken.js
