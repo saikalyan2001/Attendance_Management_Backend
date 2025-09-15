@@ -18,3 +18,5 @@ coverage/
 Thumbs.db
 
 config/service-account-key.json
+
+getRefreshToken.js
