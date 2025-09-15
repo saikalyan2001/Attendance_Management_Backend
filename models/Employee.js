@@ -1,6 +1,5 @@
 import mongoose from 'mongoose';
 
-
 const getEmployeeWorkingDays = async (locationId, year, month) => {
   try {
     const Settings = mongoose.model('Settings');
@@ -22,27 +21,25 @@ const getEmployeeWorkingDays = async (locationId, year, month) => {
     // Return default if no policy found
     return settings.defaultWorkingDaysPerMonth || 30;
   } catch (error) {
-    
     return 30; // Default fallback
   }
 };
 
 const documentSchema = new mongoose.Schema({
   // Google Drive fields (primary)
-  googleDriveId: { type: String, required: true }, 
-  originalName: { type: String, required: true }, 
-  filename: { type: String, required: true }, 
-  mimeType: { type: String, required: true }, 
-  size: { type: Number, required: true }, 
+  googleDriveId: { type: String }, 
+  originalName: { type: String }, 
+  filename: { type: String }, 
+  mimeType: { type: String }, 
+  size: { type: Number }, 
   webViewLink: { type: String }, 
   webContentLink: { type: String }, 
   uploadedAt: { type: Date, default: Date.now },
   createdTime: { type: String }, 
 
-  // ✅ NEW: Location tracking
+  // Location tracking
   locationName: { type: String, default: 'General' },
   locationFolderId: { type: String },
-  
   
   // Backward compatibility (keep for existing documents)
   name: { type: String }, 
@@ -50,69 +47,67 @@ const documentSchema = new mongoose.Schema({
 }, { _id: true });
 
 const advanceSchema = new mongoose.Schema({
-  year: { type: Number, required: true },
-  month: { type: Number, required: true, min: 1, max: 12 },
-  amount: { type: Number, required: true, min: 0 },
+  year: { type: Number },
+  month: { type: Number },
+  amount: { type: Number },
   updatedAt: { type: Date, default: Date.now },
-  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { _id: false });
 
-// models/Employee.js - UPDATE the monthlyLeaveSchema
+// Monthly leave schema without validations
 const monthlyLeaveSchema = new mongoose.Schema({
-  year: { type: Number, required: true },
-  month: { type: Number, required: true, min: 1, max: 12 },
-  allocated: { type: Number, default: 2 }, // ✅ REMOVED: min: 0
-  taken: { type: Number, default: 0 }, // ✅ REMOVED: min: 0  
-  carriedForward: { type: Number, default: 0 }, // ✅ REMOVED: min: 0
-  available: { type: Number, default: 2 }, // ✅ REMOVED: min: 0 - Allow negative balances
+  year: { type: Number },
+  month: { type: Number },
+  allocated: { type: Number, default: 2 },
+  taken: { type: Number, default: 0 },
+  carriedForward: { type: Number, default: 0 },
+  available: { type: Number, default: 2 },
 }, { _id: false });
 
-
-// ✅ NEW: Monthly presence tracking schema
+// Monthly presence tracking schema
 const monthlyPresenceSchema = new mongoose.Schema({
-  year: { type: Number, required: true },
-  month: { type: Number, required: true, min: 1, max: 12 },
-  totalPresenceDays: { type: Number, default: 0, min: 0 },
-  workingDaysInMonth: { type: Number, default: 30 }, // Base days for calculation
+  year: { type: Number },
+  month: { type: Number },
+  totalPresenceDays: { type: Number, default: 0 },
+  workingDaysInMonth: { type: Number, default: 30 },
   lastUpdated: { type: Date, default: Date.now }
 }, { _id: false });
 
 const employeeSchema = new mongoose.Schema({
-  employeeId: { type: String, required: true, unique: true },
-  name: { type: String, required: true },
-  email: { type: String, required: true, unique: true, lowercase: true },
-  designation: { type: String, required: true },
-  department: { type: String, required: true },
-  salary: { type: Number, required: true },
-  location: { type: mongoose.Schema.Types.ObjectId, ref: 'Location', required: true },
+  employeeId: { type: String },
+  name: { type: String },
+  email: { type: String, lowercase: true },
+  designation: { type: String },
+  department: { type: String },
+  salary: { type: Number },
+  location: { type: mongoose.Schema.Types.ObjectId, ref: 'Location' },
   paidLeaves: {
-    available: { type: Number, default: 0, min: 0 },
-    used: { type: Number, default: 0, min: 0 },
-    carriedForward: { type: Number, default: 0, min: 0 },
+    available: { type: Number, default: 0 },
+    used: { type: Number, default: 0 },
+    carriedForward: { type: Number, default: 0 },
   },
   monthlyLeaves: [monthlyLeaveSchema],
-  // ✅ NEW: Monthly presence tracking for salary calculation
   monthlyPresence: [monthlyPresenceSchema],
   advances: [advanceSchema],
   documents: [
     {
-      name: { type: String, required: true },
-      path: { type: String, required: true },
+      name: { type: String },
+      path: { type: String },
       uploadedAt: { type: Date, default: Date.now },
       size: { type: Number },
     },
   ],
   phone: { type: String },
   dob: { type: Date },
-  joinDate: { type: Date, required: true },
+  joinDate: { type: Date },
   bankDetails: {
-    accountNo: { type: String, required: true },
-    ifscCode: { type: String, required: true },
-    bankName: { type: String, required: true },
-    accountHolder: { type: String, required: true },
+    accountNo: { type: String },
+    ifscCode: { type: String },
+    bankName: { type: String },
+    accountHolder: { type: String },
   },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  status: { type: String, default: 'active' },
   isDeleted: { type: Boolean, default: false },
   transferHistory: [
     {
@@ -123,19 +118,19 @@ const employeeSchema = new mongoose.Schema({
   ],
   employmentHistory: [
     {
-      startDate: { type: Date, required: true },
+      startDate: { type: Date },
       endDate: { type: Date, default: null },
-      status: { type: String, enum: ['active', 'inactive'], required: true },
+      status: { type: String },
       leaveBalanceAtEnd: { type: Number },
     },
   ],
-  advance: { type: Number, default: 0, min: 0, select: false },
+  advance: { type: Number, default: 0, select: false },
   advanceHistory: [advanceSchema],
   isManualPaidLeavesUpdate: { type: Boolean, default: false },
   transferTimestamp: { type: Date, default: null },
 });
 
-// ✅ ENHANCED pre-save hook with presence initialization
+// Pre-save hook without validations - only initialization logic
 employeeSchema.pre('save', async function (next) {
   const joinDate = new Date(this.joinDate);
   const joinYear = joinDate.getFullYear();
@@ -157,15 +152,13 @@ employeeSchema.pre('save', async function (next) {
     );
     
     if (locationSetting) {
-      // Use location-specific setting - REMOVE Math.floor() to allow decimals
+      // Use location-specific setting
       totalYearlyAllocation = locationSetting.paidLeavesPerYear;
-      monthlyAllocation = locationSetting.paidLeavesPerYear / 12; // Keep decimal precision
-      
+      monthlyAllocation = locationSetting.paidLeavesPerYear / 12;
     } else {
       // Fall back to global setting
       totalYearlyAllocation = settings.paidLeavesPerYear || 24;
-      monthlyAllocation = (settings.paidLeavesPerYear || 24) / 12; // Keep decimal precision
-      
+      monthlyAllocation = (settings.paidLeavesPerYear || 24) / 12;
     }
   }
 
@@ -179,30 +172,30 @@ employeeSchema.pre('save', async function (next) {
         this.monthlyLeaves.push({
           year: y,
           month: m,
-          allocated: monthlyAllocation, // Now supports decimal values
+          allocated: monthlyAllocation,
           taken: 0,
           carriedForward: 0,
-          available: monthlyAllocation, // Now supports decimal values
+          available: monthlyAllocation,
         });
       }
     }
   }
 
-  // ✅ NEW: Initialize monthlyPresence with location-specific working days
+  // Initialize monthlyPresence with location-specific working days
   if (this.isNew && (!this.monthlyPresence || this.monthlyPresence.length === 0)) {
     this.monthlyPresence = [];
     for (let y = joinYear; y <= currentYear; y++) {
       const startMonth = y === joinYear ? joinMonth : 1;
       const endMonth = y === currentYear ? currentMonth : 12;
       for (let m = startMonth; m <= endMonth; m++) {
-        // ✅ Calculate location-specific working days
+        // Calculate location-specific working days
         const workingDaysInMonth = await getEmployeeWorkingDays(this.location, y, m);
         
         this.monthlyPresence.push({
           year: y,
           month: m,
           totalPresenceDays: 0,
-          workingDaysInMonth: workingDaysInMonth, // ✅ Use location-specific working days
+          workingDaysInMonth: workingDaysInMonth,
           lastUpdated: new Date()
         });
       }
@@ -236,13 +229,6 @@ employeeSchema.pre('save', async function (next) {
   }
 
   // Auto-calculate logic
-  
-  
-  
-  
-  
-  
-
   const paidLeavesModified = this.isModified('paidLeaves.available') || 
                              this.isModified('paidLeaves.used') || 
                              this.isModified('paidLeaves.carriedForward');
@@ -252,27 +238,17 @@ employeeSchema.pre('save', async function (next) {
                               !paidLeavesModified;
 
   if (shouldAutoCalculate) {
-    
     const totalTaken = this.monthlyLeaves.reduce((sum, ml) => sum + ml.taken, 0);
-    
     this.set('paidLeaves.used', totalTaken);
     this.set('paidLeaves.available', Math.max(0, totalYearlyAllocation - totalTaken));
-    
   } else if (this.isNew) {
     // Set initial paidLeaves for new employees based on location
     this.set('paidLeaves.available', totalYearlyAllocation);
     this.set('paidLeaves.used', 0);
     this.set('paidLeaves.carriedForward', 0);
-    
-  } else {
-    
   }
 
   next();
 });
-
-
-// Add case-insensitive index for email
-employeeSchema.index({ email: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
 
 export default mongoose.model('Employee', employeeSchema);
