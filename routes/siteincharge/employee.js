@@ -19,6 +19,7 @@ import {
 } from '../../controllers/siteincharge/employeesController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 import upload from '../../utils/multer.js';
+import { getEmployeeMonthlySalary, getPayrollSummary } from '../../controllers/admin/employeesController.js';
 
 const router = express.Router();
 
@@ -42,5 +43,7 @@ router.put('/employees/:id/advance', updateEmployeeAdvance);
 router.post('/employees/importEmployees', upload.single('excelFile'), addEmployeesFromExcel); // Added multer middleware
 router.delete('/employees/:id/delete', deleteEmployee); // Updated to use /delete
 router.put('/employees/:id/restore', restoreEmployee); // Added restore route
+router.get('/employees/:id/salary/:year/:month', getEmployeeMonthlySalary);
+router.get('/payroll/:year/:month', getPayrollSummary);
 
 export default router;

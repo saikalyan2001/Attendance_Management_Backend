@@ -5,6 +5,8 @@ import AttendanceRequest from "../../models/AttendanceRequest.js";
 import Settings from "../../models/Settings.js";
 import Location from "../../models/Location.js";
 import { initializeMonthlyLeaves } from "../../utils/leaveUtils.js";
+import { isWorkingDay, getWorkingDayPolicyInfo, shouldCountForSalary } from '../../utils/workingDayValidator.js';
+
 
 function userHasLocation(user, location) {
   const userLocationIds = user.locations.map((loc) =>
@@ -178,6 +180,105 @@ export const calculateSalaryImpact = async (req, res) => {
   }
 };
 
+// ✅ NEW: Enhanced attendance validation function
+const validateAttendanceDate = async (employeeId, date, isException = false) => {
+  try {
+    const employee = await Employee.findById(employeeId).populate('location');
+    if (!employee) {
+      throw new Error('Employee not found');
+    }
+    
+    const settings = await Settings.findOne()
+      .populate('workingDayPolicies.locations')
+      .lean();
+    
+    const isWorking = isWorkingDay(settings, employee.location._id, date);
+    const policyInfo = getWorkingDayPolicyInfo(settings, employee.location._id);
+    
+    return {
+      isWorkingDay: isWorking,
+      policyInfo,
+      canMarkAttendance: isWorking || isException,
+      requiresException: !isWorking,
+      locationName: employee.location.name,
+      employee: employee
+    };
+  } catch (error) {
+    
+    return {
+      isWorkingDay: true,
+      canMarkAttendance: true,
+      requiresException: false,
+      error: error.message
+    };
+  }
+};
+
+// ✅ NEW: Get working day policy for a location endpoint
+export const getLocationWorkingDayPolicy = async (req, res) => {
+  
+  
+  
+  
+  try {
+    const { locationId, date } = req.query;
+    
+
+    if (!locationId) {
+      
+      return res.status(400).json({ message: 'Location ID is required' });
+    }
+
+    // ✅ Check if user has access to this location
+    if (!userHasLocation(req.user, locationId)) {
+      return res.status(403).json({ message: 'Location not assigned to user' });
+    }
+
+    
+    const settings = await Settings.findOne()
+      .populate('workingDayPolicies.locations')
+      .lean();
+    
+  
+
+    const policy = getWorkingDayPolicyInfo(settings, locationId);
+    const isWorking = date ? isWorkingDay(settings, locationId, date) : null;
+
+    
+
+    const response = {
+      policy,
+      isWorkingDay: isWorking,
+      date: date || null
+    };
+
+    
+    res.json(response);
+  } catch (error) {
+    
+    res.status(500).json({ message: 'Server error while getting working day policy' });
+  }
+};
+
+// ✅ NEW: Validate attendance date endpoint
+export const validateAttendanceDateEndpoint = async (req, res) => {
+  try {
+    const { employeeId, date, isException } = req.query;
+
+    if (!employeeId || !date) {
+      return res.status(400).json({ message: 'Employee ID and date are required' });
+    }
+
+    const validation = await validateAttendanceDate(employeeId, date, isException === 'true');
+    
+    res.json(validation);
+  } catch (error) {
+    
+    res.status(500).json({ message: 'Server error while validating attendance date' });
+  }
+};
+
+
 
 export const markBulkAttendance = async (req, res) => {
   try {
@@ -194,133 +295,203 @@ export const markBulkAttendance = async (req, res) => {
       return res.status(400).json({ message: 'Invalid or empty attendance array' });
     }
 
-    // Validate each attendance record
-    const dateRegex = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{3})?(\+\d{2}:\d{2})$/;
+    const settings = await Settings.findOne()
+      .populate('workingDayPolicies.locations')
+      .lean();
+
+    const attendanceRecords = [];
+    const errors = [];
+    const existingRecords = [];
+    const workingDayWarnings = [];
+
+    // Enhanced validation phase with working day checks
     for (const record of attendance) {
-      if (
-        !record.employeeId ||
-        !record.date ||
-        !record.status ||
-        !record.location ||
-        !['present', 'absent', 'leave', 'half-day'].includes(record.status) ||
-        !mongoose.isValidObjectId(record.employeeId) ||
-        !mongoose.isValidObjectId(record.location) ||
-        !dateRegex.test(record.date)
-      ) {
-        return res.status(400).json({ message: `Invalid attendance record: ${JSON.stringify(record)}` });
+      const { employeeId, date, status, location, isException, exceptionReason, exceptionDescription } = record;
+
+      if (!employeeId || !date || !status || !location) {
+        errors.push({ message: `Missing required fields for employee ${employeeId}` });
+        continue;
       }
+
+      if (!['present', 'absent', 'leave', 'half-day'].includes(status)) {
+        errors.push({ message: `Invalid status '${status}' for employee '${employeeId}'` });
+        continue;
+      }
+
+      if (!mongoose.isValidObjectId(employeeId) || !mongoose.isValidObjectId(location)) {
+        errors.push({ message: `Invalid employee or location ID for ${employeeId}` });
+        continue;
+      }
+
+      // ✅ Check if user has access to this location
+      if (!userHasLocation(req.user, location)) {
+        errors.push({ message: `Location ${location} not assigned to user` });
+        continue;
+      }
+
+      const targetDateTime = new Date(date);
+      if (isNaN(targetDateTime.getTime()) || targetDateTime > new Date()) {
+        errors.push({ message: `Invalid or future date for employee ${employeeId}: ${date}` });
+        continue;
+      }
+
+      const employee = await Employee.findById(employeeId);
+      if (!employee) {
+        errors.push({ message: `Employee ${employeeId} not found` });
+        continue;
+      }
+
+      // ✅ NEW: Working day validation
+      const validation = await validateAttendanceDate(employeeId, date, isException);
+      
+      if (!validation.canMarkAttendance) {
+        errors.push({
+          message: `Cannot mark attendance for ${employee.name} on ${date.split('T')[0]} - ${validation.policyInfo.policyName} excludes this day. Use exception marking if needed.`
+        });
+        continue;
+      }
+
+      if (validation.requiresException && !isException) {
+        workingDayWarnings.push({
+          employeeId,
+          employeeName: employee.name,
+          date: date.split('T')[0],
+          policyInfo: validation.policyInfo,
+          message: `${employee.name}: ${date.split('T')[0]} is not a working day per ${validation.policyInfo.policyName}. Consider marking as exception.`
+        });
+      }
+
+      // Exception validation
+      if (isException) {
+        if (!exceptionReason) {
+          errors.push({ message: `Exception reason is required for ${employee.name} on non-working day` });
+          continue;
+        }
+        if (exceptionReason === 'other' && !exceptionDescription) {
+          errors.push({ message: `Exception description is required when reason is 'other' for ${employee.name}` });
+          continue;
+        }
+      }
+
+      // Check for existing records
+      const dateStr = date.split('T')[0];
+      const startOfDay = `${dateStr}T00:00:00.000+05:30`;
+      const endOfDay = `${dateStr}T23:59:59.999+05:30`;
+      
+      const existingRecord = await Attendance.findOne({
+        employee: employeeId,
+        location,
+        date: { $gte: startOfDay, $lte: endOfDay },
+        isDeleted: false,
+      });
+
+      if (existingRecord && !overwrite) {
+        existingRecords.push({
+          employeeId,
+          date: existingRecord.date,
+          status: existingRecord.status,
+        });
+        continue;
+      }
+
+      // Validate location assignment
+      if (employee.location.toString() !== location) {
+        errors.push({
+          message: `Employee ${employee.name} does not belong to location ${location}`,
+        });
+        continue;
+      }
+
+      // Calculate presence days
+      let presenceDays = 0;
+      if (status === 'present') {
+        presenceDays = 1.0;
+      } else if (status === 'half-day') {
+        presenceDays = 0.5;
+      }
+
+      attendanceRecords.push({
+        employee: employeeId,
+        date,
+        status,
+        location,
+        markedBy: userId,
+        presenceDays,
+        isException: isException || false,
+        exceptionReason: exceptionReason || undefined,
+        exceptionDescription: exceptionDescription || undefined,
+        approvedBy: isException ? userId : undefined,
+        isDeleted: false,
+      });
     }
 
-    // Start transaction
+    if (errors.length > 0) {
+      return res.status(400).json({ 
+        message: 'Validation errors', 
+        errors,
+        workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
+      });
+    }
+
+    if (existingRecords.length > 0 && !overwrite) {
+      return res.status(409).json({
+        message: `Attendance already marked for ${existingRecords.length} employee(s)`,
+        existingRecords,
+        workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
+      });
+    }
+
+    // Process attendance with transaction
     const result = await executeWithRetry(async () => {
       const session = await mongoose.startSession();
       try {
         session.startTransaction();
 
-        // Fetch existing attendance records
-        const dateStr = attendance[0].date.split('T')[0]; // Extract YYYY-MM-DD
-        const startOfDay = `${dateStr}T00:00:00.000+05:30`;
-        const endOfDay = `${dateStr}T23:59:59.999+05:30`;
-        const employeeIds = attendance.map((record) => record.employeeId);
-        const existingRecords = await Attendance.find({
-          employee: { $in: employeeIds },
-          date: { $gte: startOfDay, $lte: endOfDay },
-          isDeleted: false,
-        })
-          .session(session)
-          .lean();
+        const attendanceIds = [];
+        const year = new Date(attendanceRecords[0].date).getFullYear();
+        const month = new Date(attendanceRecords[0].date).getMonth() + 1;
 
-        // Check for existing records if overwrite is false
-        if (!overwrite && Array.isArray(existingRecords) && existingRecords.length > 0) {
-          await session.abortTransaction();
-          return res.status(400).json({
-            message: `Attendance already marked for ${existingRecords.length} employee(s) on ${dateStr}. Use overwrite option.`,
-          });
-        }
+        for (const record of attendanceRecords) {
+          const { employee: employeeId, status, isException, exceptionReason, exceptionDescription } = record;
+          
+          
 
-        // Fetch employees
-        const employees = await Employee.find({
-          _id: { $in: employeeIds },
-          status: 'active',
-        }).session(session);
+          const employee = await Employee.findById(employeeId).session(session);
+          if (!employee) continue;
 
-        if (!Array.isArray(employees) || employees.length !== employeeIds.length) {
-          await session.abortTransaction();
-          return res.status(400).json({ message: 'One or more employees not found or inactive' });
-        }
-
-        // Initialize monthly leaves and process attendance
-        const attendanceRecords = [];
-        const year = new Date(attendance[0].date).getFullYear();
-        const month = new Date(attendance[0].date).getMonth() + 1;
-
-        for (const record of attendance) {
-          const employee = employees.find(
-            (emp) => emp._id.toString() === record.employeeId
-          );
-          if (!employee) {
-            await session.abortTransaction();
-            return res.status(400).json({ message: `Employee ${record.employeeId} not found` });
-          }
-
-          // Validate location
-          if (employee.location.toString() !== record.location) {
-            await session.abortTransaction();
-            return res.status(400).json({
-              message: `Employee ${employee.name} does not belong to location ${record.location}`,
-            });
-          }
-
-          // Initialize monthly leaves for the current month
+          // Initialize monthly leaves
           await initializeMonthlyLeaves(employee, year, month, session);
-
-          // Update monthly leaves based on status
           let monthlyLeave = employee.monthlyLeaves.find(
             (ml) => ml.year === year && ml.month === month
           );
 
-          if (!monthlyLeave) {
-            await session.abortTransaction();
-            return res.status(500).json({ message: `Monthly leaves not initialized for ${employee.name}` });
-          }
-
-          // Update leave balance for leave only
-          if (record.status === 'leave') {
+          // Handle leave deductions
+          if (status === 'leave') {
             if (monthlyLeave.available < 1) {
-              await session.abortTransaction();
-              return res.status(400).json({
-                message: `Insufficient leaves for ${employee.name} in ${month}/${year}`,
-              });
+              throw new Error(`Insufficient leaves for ${employee.name} in ${month}/${year}`);
             }
             monthlyLeave.taken += 1;
             monthlyLeave.available -= 1;
-            await employee.save({ session }); // Save employee if leaves modified
+            await employee.save({ session });
+          } else if (status === 'half-day') {
+            monthlyLeave.taken += 0.5;
+            monthlyLeave.available -= 0.5;
+            await employee.save({ session });
           }
 
-          // Update carryforward for the next month for all statuses
+          // Update carryforward
           await updateNextMonthCarryforward(employee, year, month, session);
 
           // Create attendance record
-          attendanceRecords.push({
-            employee: record.employeeId,
-            date: record.date, // Use full ISO 8601 string
-            status: record.status,
-            location: record.location,
-            markedBy: userId,
-            isDeleted: false,
-          });
+          const attendanceRecord = new Attendance(record);
+          await attendanceRecord.save({ session });
+          attendanceIds.push(attendanceRecord._id);
+
+          
         }
 
-        // Insert attendance records
-        const insertedRecords = await Attendance.insertMany(attendanceRecords, { session });
-
-        // Commit transaction
         await session.commitTransaction();
-
-        return res.status(200).json({
-          message: 'Attendance marked successfully',
-          attendanceIds: insertedRecords.map((record) => record._id),
-        });
+        return { attendanceIds };
       } catch (error) {
         await session.abortTransaction();
         throw error;
@@ -329,13 +500,25 @@ export const markBulkAttendance = async (req, res) => {
       }
     });
 
-    return result;
+    res.status(201).json({
+      message: 'Bulk attendance marked successfully',
+      attendanceIds: result.attendanceIds,
+      workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
+    });
+
   } catch (error) {
-    return res.status(500).json({ message: 'Server error', error: error.message });
+    
+    res.status(500).json({ 
+      message: 'Server error while marking bulk attendance', 
+      error: error.message 
+    });
   }
 };
 
+
+
 // Mark single attendance
+// Update the existing markAttendance function in your controller
 export const markAttendance = async (req, res) => {
   return executeWithRetry(async () => {
     const session = await mongoose.startSession();
@@ -347,9 +530,7 @@ export const markAttendance = async (req, res) => {
       const errors = [];
       const updatedRecords = [];
 
-      const userLocationIds = req.user.location.map((loc) =>
-        loc.toString()
-      );
+      const userLocationIds = req.user.location.map((loc) => loc.toString());
 
       for (const record of attendanceRecords) {
         const { employeeId, date, status, location } = record;
@@ -415,13 +596,16 @@ export const markAttendance = async (req, res) => {
           continue;
         }
 
+        // ✅ ENHANCED: Initialize monthly leaves for both leave and half-day
         if (status === "leave" || status === "half-day") {
           await correctMonthlyLeaves(employee, year, month, session);
         }
 
         let monthlyLeave = await initializeMonthlyLeaves(employee, year, month, session);
 
-        if ((status === "leave" || status === "half-day") && monthlyLeave.available <= 0) {
+        // ✅ REMOVED: Half-day validation - allow negative balance
+        // Only check for full leave
+        if (status === "leave" && monthlyLeave.available < 1) {
           errors.push({
             message: `No leave balance available for ${employeeId}`,
           });
@@ -429,11 +613,18 @@ export const markAttendance = async (req, res) => {
         }
 
         let leaveDeduction = 0;
+        let presenceDays = 0; // ✅ NEW: Calculate presence days
+
         if (status === "leave") {
           leaveDeduction = 1;
+          presenceDays = 0;
         } else if (status === "half-day") {
-          leaveDeduction = 0.5;
+          leaveDeduction = 0.5; // ✅ ENHANCED: Half-day deduction
+          presenceDays = 0.5;
+        } else if (status === "present") {
+          presenceDays = 1.0;
         }
+        // absent = 0 presence days
 
         if (leaveDeduction > 0) {
           monthlyLeave.taken += leaveDeduction;
@@ -442,7 +633,6 @@ export const markAttendance = async (req, res) => {
             0
           );
           await employee.save({ session });
-
           await updateNextMonthCarryforward(employee, year, month, session);
         }
 
@@ -453,6 +643,7 @@ export const markAttendance = async (req, res) => {
           location,
           createdBy: userId,
           updatedBy: userId,
+          presenceDays: presenceDays, // ✅ NEW: Store presence value
         });
 
         await newAttendance.save({ session });
@@ -488,10 +679,10 @@ export const markAttendance = async (req, res) => {
       throw error;
     }
   }).catch((error) => {
-
     res.status(500).json({ message: "Server error", error: error.message });
   });
 };
+
 
 export const undoAttendance = async (req, res) => {
   return executeWithRetry(async (session) => {

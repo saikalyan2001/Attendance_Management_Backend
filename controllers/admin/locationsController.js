@@ -3,12 +3,57 @@ import Location from '../../models/Location.js';
 import Employee from '../../models/Employee.js';
 
 // Original getLocations (unchanged)
+// In locationController.js - update getLocations function
 export const getLocations = async (req, res) => {
   try {
     const { user } = req;
+    const { filter, role: queryRole } = req.query;
+    
     let query = { isDeleted: false };
+    
+    // ✅ FIXED: Role-based location visibility filtering
     if (user.role === 'siteincharge') {
+      // Site-in-charge: only their assigned locations
       query._id = { $in: user.locations };
+    } else if (user.role === 'admin') {
+      // Admin: only specific locations (add your business logic here)
+      // Example: Exclude headquarter locations for admins
+      query.locationType = { $ne: 'headquarters' };
+    } else if (user.role === 'super_admin') {
+      // ✅ SuperAdmin filtering - choose one of these approaches:
+      
+      // APPROACH 1: Limit SuperAdmin to specific location types
+      if (filter === 'attendance_locations') {
+        query.locationType = { $in: ['office', 'branch', 'warehouse'] }; // Exclude headquarters
+      }
+      
+      // APPROACH 2: Exclude locations with specific criteria  
+      else if (filter === 'operational_only') {
+        query.$and = [
+          { name: { $not: /test|demo|training/i } }, // Exclude test locations
+          { isActive: true } // Only active locations
+        ];
+      }
+      
+      // APPROACH 3: Only show locations with minimum employee count
+      else if (filter === 'active_locations') {
+        const locationIds = await Employee.aggregate([
+          { $match: { isDeleted: false, status: 'active' } },
+          { $group: { _id: '$location', count: { $sum: 1 } } },
+          { $match: { count: { $gte: 1 } } }, // At least 1 active employee
+          { $project: { _id: 1 } }
+        ]);
+        
+        const activeLocationIds = locationIds.map(item => item._id);
+        query._id = { $in: activeLocationIds };
+      }
+      
+      // APPROACH 4: Custom business logic
+      else if (filter === 'restricted') {
+        // Example: SuperAdmin can't see certain sensitive locations
+        const restrictedLocationNames = ['HR Office', 'Executive Floor', 'Board Room'];
+        query.name = { $nin: restrictedLocationNames };
+      }
     }
 
     const locations = await Location.find(query).lean();
@@ -16,17 +61,21 @@ export const getLocations = async (req, res) => {
       locations.map(async (loc) => {
         const employeeCount = await Employee.countDocuments({ 
           location: loc._id,
-          isDeleted: false
+          isDeleted: false,
+          status: 'active' // Only count active employees
         });
         return { ...loc, employeeCount };
       })
     );
+    
     res.json(locationsWithCount);
   } catch (error) {
-
+    
     res.status(500).json({ message: 'Server error while fetching locations' });
   }
 };
+
+
 
 // ✅ FIXED: Enhanced getPaginatedLocations with proper sorting
 export const getPaginatedLocations = async (req, res) => {

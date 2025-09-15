@@ -26,10 +26,40 @@ const attendanceSchema = new mongoose.Schema({
     enum: ['present', 'absent', 'leave', 'half-day'],
     required: true,
   },
+  // Store presence value for salary calculation
+  presenceDays: {
+    type: Number,
+    default: function() {
+      if (this.status === 'present') return 1.0;
+      if (this.status === 'half-day') return 0.5;
+      return 0; // absent, leave
+    }
+  },
+  
+  // ✅ NEW: Exception handling fields
+  isException: {
+    type: Boolean,
+    default: false,
+  },
+  exceptionReason: {
+    type: String,
+    enum: ['overtime', 'emergency', 'client_work', 'management_approval', 'other'],
+    required: function() { return this.isException; }
+  },
+  exceptionDescription: {
+    type: String,
+    required: function() { return this.isException && this.exceptionReason === 'other'; }
+  },
+  
   markedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: function() { return this.isException; }
   },
   isDeleted: {
     type: Boolean,
@@ -50,6 +80,20 @@ const attendanceSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+// Pre-save hook to calculate presence days
+attendanceSchema.pre('save', function(next) {
+  if (this.status === 'present') {
+    this.presenceDays = 1.0;
+  } else if (this.status === 'half-day') {
+    this.presenceDays = 0.5;
+  } else if (this.status === 'leave') {
+    this.presenceDays = 1.0; // ✅ FIXED: Paid leaves should count as full attendance
+  }  else {
+    this.presenceDays = 0; // absent, leave
+  }
+  next();
+});
+
 // Add unique index on employee and date (ignoring time)
 attendanceSchema.index(
   { employee: 1, date: 1 },
@@ -59,8 +103,6 @@ attendanceSchema.index(
     collation: {
       locale: 'en',
       strength: 2,
-      // Normalize date to start of day for uniqueness
-      key: { date: { $dateToString: { format: '%Y-%m-%d', date: '$date' } } },
     },
   }
 );

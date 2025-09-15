@@ -26,6 +26,7 @@ import superAdminSettingsRoutes from './routes/superadmin/settings.js';
 import superAdminEmployeesRoutes from './routes/superadmin/employees.js';
 import superAdminAttendanceRoutes from './routes/superadmin/attendance.js'; // New import
 import superAdminReportsRoutes from './routes/superadmin/reports.js'; // New import
+import filesRoutes from './routes/files.js';
 
 dotenv.config();
 
@@ -77,6 +78,8 @@ app.use('/api/superadmin', superAdminSettingsRoutes);
 app.use('/api/superadmin', superAdminEmployeesRoutes); 
 app.use('/api/superadmin', superAdminAttendanceRoutes); // Mount superadmin employees routes
 app.use('/api/superadmin', superAdminReportsRoutes); // Mount superadmin employees routes
+
+app.use('/api/files', filesRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

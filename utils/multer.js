@@ -18,22 +18,22 @@ const storage = multer.diskStorage({
       const uploadDir =
         file.fieldname === "excelFile" ? excelUploadDir : documentUploadDir;
       await fs.mkdir(uploadDir, { recursive: true });
-      console.log(`Upload directory created/verified for ${file.fieldname}: ${uploadDir}`);
+      
       cb(null, uploadDir);
     } catch (err) {
-      console.error(`Failed to create upload directory ${uploadDir}:`, err.message);
+      
       cb(new Error(`Failed to create upload directory: ${err.message}`));
     }
   },
   filename: (req, file, cb) => {
     if (!file || !file.originalname) {
-      console.error("Invalid file object:", file);
+      
       return cb(new Error("Invalid file object: missing originalname"));
     }
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     const prefix = file.fieldname === "excelFile" ? "excel" : "documents";
     const filename = `${prefix}-${uniqueSuffix}${path.extname(file.originalname)}`;
-    console.log(`Generated filename for ${file.originalname}: ${filename}`);
+    
     cb(null, filename);
   },
 });
@@ -65,11 +65,11 @@ const fileFilter = (req, file, cb) => {
   const mimetype = allowedMimeTypes.includes(file.mimetype.toLowerCase());
 
   if (extname && mimetype) {
-    console.log(`File type validated: ${file.originalname} (${file.fieldname}, MIME: ${file.mimetype})`);
+    
     return cb(null, true);
   }
 
-  console.error(`Invalid file type for ${file.originalname}: MIME=${file.mimetype}, Extension=${path.extname(file.originalname)}`);
+  
   cb(
     new Error(
       `File type not supported. Allowed types: ${

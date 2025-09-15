@@ -1,4 +1,3 @@
-// src/features/admin/routes/router.js
 import express from 'express';
 import {
   getAttendance,
@@ -10,9 +9,11 @@ import {
   requestAttendanceEdit,
   exportAttendance,
   undoMarkAttendance,
+  getLocationWorkingDayPolicy, // ✅ ADD
+  validateAttendanceDateEndpoint, // ✅ ADD
 } from '../../controllers/admin/attendanceController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
-("route");
+
 const router = express.Router();
 
 router.use(protect);
@@ -26,6 +27,10 @@ router.get('/attendance/requests', getAttendanceRequests);
 router.post('/attendance/requests', requestAttendanceEdit);
 router.put('/attendance/requests/:id', handleAttendanceRequest);
 router.get('/attendance/export', exportAttendance);
-router.post('/attendance/undo', undoMarkAttendance); 
+router.post('/attendance/undo', undoMarkAttendance);
+
+// ✅ ADD: Working day validation endpoints
+router.get('/attendance/working-day-policy', getLocationWorkingDayPolicy);
+router.get('/attendance/validate-date', validateAttendanceDateEndpoint);
 
 export default router;

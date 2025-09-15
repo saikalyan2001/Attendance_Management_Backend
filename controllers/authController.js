@@ -158,9 +158,9 @@ export const setPassword = async (req, res) => {
     }
 
     // Debug logging
-    console.log('=== SET PASSWORD DEBUG ===');
-    console.log('Received token:', token);
-    console.log('Current time:', new Date());
+    
+    
+    
 
     const user = await User.findOne({
       resetPasswordToken: token,
@@ -173,18 +173,18 @@ export const setPassword = async (req, res) => {
       });
     }
 
-    console.log('Setting password for user:', user.email);
+    
 
     user.password = newPassword;
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     await user.save();
 
-    console.log('Password set successfully for:', user.email);
+    
 
     res.json({ message: 'Password set successfully! You can now log in with your credentials.' });
   } catch (error) {
-    console.error('Set password error:', error);
+    
     res.status(500).json({ message: 'Unable to set password at this time. Please try again or contact support.' });
   }
 };

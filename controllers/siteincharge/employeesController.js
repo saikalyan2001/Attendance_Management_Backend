@@ -10,6 +10,8 @@ import { initializeMonthlyLeaves } from '../../utils/leaveUtils.js';
 import expressAsyncHandler from 'express-async-handler';
 import AppError from '../../utils/AppError.js';
 import XLSX from "xlsx";
+import googleDriveService from '../../utils/googleDriveService.js';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -77,12 +79,12 @@ export const getEmployees = async (req, res) => {
       if (req.query.department) query.department = req.query.department;
 
       if (search && search.trim() !== '') {
-      const regex = new RegExp(search.trim(), 'i'); // case-insensitive
-      query.$or = [
-        { name:       { $regex: regex } },
-        { employeeId: { $regex: regex } },
-      ];
-     }
+        const regex = new RegExp(search.trim(), 'i'); // case-insensitive
+        query.$or = [
+          { name: { $regex: regex } },
+          { employeeId: { $regex: regex } },
+        ];
+      }
 
       const userLocationIds = getUserLocationIds(req.user);
       if (location && !userLocationIds.includes(location)) {
@@ -91,66 +93,76 @@ export const getEmployees = async (req, res) => {
 
       const skip = (pageNum - 1) * limitNum;
 
-      // Start a session for fetching employees
-      const session = await mongoose.startSession();
-      try {
-        session.startTransaction();
+      // ✅ FIXED: Separate the two operations with proper error handling
+      let employees = [];
+      let total = 0;
 
-        // Fetch total count and employees without modifying documents
-        const total = await Employee.countDocuments(query).session(session);
-        const employees = await Employee.find(query)
+      // First operation: Fetch employees (with transaction)
+      const fetchSession = await mongoose.startSession();
+      try {
+        fetchSession.startTransaction();
+
+        total = await Employee.countDocuments(query).session(fetchSession);
+        employees = await Employee.find(query)
           .populate("location", "name address")
           .sort({ employeeId: 1 })
           .skip(skip)
           .limit(limitNum)
-          .session(session)
+          .session(fetchSession)
           .lean();
 
-        await session.commitTransaction();
-        session.endSession();
+        await fetchSession.commitTransaction();
+      } catch (error) {
+        await fetchSession.abortTransaction();
+        throw error;
+      } finally {
+        fetchSession.endSession();
+      }
 
-        // Initialize monthlyLeaves for each employee in separate transactions
-        const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
-        const targetYear = year ? parseInt(year) : new Date().getFullYear();
-        const updatedEmployees = [];
+      // Second operation: Initialize monthly leaves for each employee (separate transactions)
+      const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
+      const targetYear = year ? parseInt(year) : new Date().getFullYear();
+      const updatedEmployees = [];
 
-        for (const employee of employees) {
+      for (const employee of employees) {
+        try {
           const empSession = await mongoose.startSession();
           try {
             empSession.startTransaction();
             const emp = await Employee.findById(employee._id).session(empSession);
             if (emp) {
               await initializeMonthlyLeaves(emp, targetYear, targetMonth, empSession);
+              await empSession.commitTransaction();
               updatedEmployees.push({ ...employee, monthlyLeaves: emp.monthlyLeaves });
             } else {
+              await empSession.commitTransaction();
               updatedEmployees.push(employee);
             }
-            await empSession.commitTransaction();
           } catch (error) {
             await empSession.abortTransaction();
-            throw error;
+            // ✅ FIXED: Don't throw error, just use original employee data
+                        updatedEmployees.push(employee);
           } finally {
             empSession.endSession();
           }
+        } catch (sessionError) {
+          // ✅ FIXED: Handle session creation errors gracefully
+                    updatedEmployees.push(employee);
         }
-
-        const response = {
-          employees: updatedEmployees,
-          pagination: {
-            total,
-            page: pageNum,
-            limit: limitNum,
-            totalPages: Math.ceil(total / limitNum),
-          },
-        };
-
-        res.status(200).json(response);
-        return; // Exit on success
-      } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
-        throw error;
       }
+
+      const response = {
+        employees: updatedEmployees,
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.ceil(total / limitNum),
+        },
+      };
+
+      res.status(200).json(response);
+      return; // Exit on success
     } catch (error) {
       if (error.code === 112 && error.errorLabels?.includes('TransientTransactionError')) {
         retries++;
@@ -166,6 +178,7 @@ export const getEmployees = async (req, res) => {
   }
 };
 
+
 export const getEmployee = async (req, res) => {
   try {
     const { id } = req.params;
@@ -177,7 +190,7 @@ export const getEmployee = async (req, res) => {
 
     // Validate pagination parameters for documents
     const docPageNum = parseInt(documentsPage, 10);
-    const docLimitNum = Math.min(parseInt(documentsLimit, 3), 100);
+    const docLimitNum = Math.min(parseInt(documentsLimit, 10), 100);
     if (isNaN(docPageNum) || docPageNum < 1 || isNaN(docLimitNum) || docLimitNum < 1) {
       return res.status(400).json({ message: 'Invalid documents pagination parameters' });
     }
@@ -189,20 +202,33 @@ export const getEmployee = async (req, res) => {
       return res.status(400).json({ message: 'Invalid advances pagination parameters' });
     }
 
-    // Start a session for initializing monthlyLeaves
-    const session = await mongoose.startSession();
-    try {
-      session.startTransaction();
+    // ✅ FETCH: Current settings for display purposes only (don't modify employee data)
+    let settings = await Settings.findOne().populate('locationLeaveSettings.location');
+    if (!settings) {
+      settings = await Settings.create({
+        paidLeavesPerYear: 24,
+        locationLeaveSettings: [],
+        halfDayDeduction: 0.5,
+        highlightDuration: 24 * 60 * 60 * 1000,
+      });
+    }
 
-      const employee = await Employee.findById(id)
+    let employee = null;
+
+    // Fetch employee data (with transaction)
+    const fetchSession = await mongoose.startSession();
+    try {
+      fetchSession.startTransaction();
+
+      employee = await Employee.findById(id)
         .select('employeeId name email designation department salary location paidLeaves monthlyLeaves documents phone dob joinDate bankDetails status transferTimestamp advances advanceHistory')
         .populate('location', 'name address')
-        .session(session)
+        .session(fetchSession)
         .lean();
 
       if (!employee) {
-        await session.abortTransaction();
-        session.endSession();
+        await fetchSession.commitTransaction();
+        fetchSession.endSession();
         return res.status(404).json({ message: 'Employee not found' });
       }
 
@@ -210,76 +236,148 @@ export const getEmployee = async (req, res) => {
       const employeeLocationId = normalizeLocationId(employee.location);
 
       if (!userLocationIds.includes(employeeLocationId)) {
-        await session.abortTransaction();
-        session.endSession();
+        await fetchSession.commitTransaction();
+        fetchSession.endSession();
         return res.status(403).json({ message: 'Employee not in assigned location' });
       }
 
-      // Initialize monthlyLeaves for the current or specified month/year
-      const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
-      const targetYear = year ? parseInt(year) : new Date().getFullYear();
-      const emp = await Employee.findById(id).session(session);
-      if (emp) {
-        await initializeMonthlyLeaves(emp, targetYear, targetMonth, session);
-        employee.monthlyLeaves = emp.monthlyLeaves;
-      }
-
-      let filteredEmployee = { ...employee };
-
-      // Paginate documents
-      const documents = employee.documents || [];
-      const totalDocuments = documents.length;
-      const docSkip = (docPageNum - 1) * docLimitNum;
-      const paginatedDocuments = documents.slice(docSkip, docSkip + docLimitNum);
-      filteredEmployee.documents = paginatedDocuments;
-      filteredEmployee.documentsPagination = {
-        total: totalDocuments,
-        page: docPageNum,
-        limit: docLimitNum,
-        totalPages: Math.ceil(totalDocuments / docLimitNum),
-      };
-
-      // Paginate advances
-      const advances = employee.advances || [];
-      const totalAdvances = advances.length;
-      const advSkip = (advPageNum - 1) * advLimitNum;
-      const paginatedAdvances = advances.slice(advSkip, advSkip + advLimitNum);
-      filteredEmployee.advances = paginatedAdvances;
-      filteredEmployee.advancesPagination = {
-        total: totalAdvances,
-        page: advPageNum,
-        limit: advLimitNum,
-        totalPages: Math.ceil(totalAdvances / advLimitNum),
-      };
-
-      // Filter monthlyLeaves if month and year are provided
-      if (month && year) {
-        const parsedMonth = parseInt(month);
-        const parsedYear = parseInt(year);
-        if (isNaN(parsedMonth) || isNaN(parsedYear) || parsedMonth < 1 || parsedMonth > 12) {
-          await session.abortTransaction();
-          session.endSession();
-          return res.status(400).json({ message: 'Invalid month or year' });
-        }
-        filteredEmployee.monthlyLeaves = (employee.monthlyLeaves || []).filter(
-          (ml) => ml.year === parsedYear && ml.month === parsedMonth
-        );
-      }
-
-      await session.commitTransaction();
-
-      res.set('Cache-Control', req.headers['cache-control'] || 'no-cache');
-      res.json({ employee: filteredEmployee });
+      await fetchSession.commitTransaction();
     } catch (error) {
-      await session.abortTransaction();
+      await fetchSession.abortTransaction();
       throw error;
     } finally {
-      session.endSession();
+      fetchSession.endSession();
     }
+
+    // ✅ CALCULATE: Display values for frontend without modifying employee data
+    
+    
+    // Determine location-specific or global leave allocation for display purposes
+    let paidLeavesPerYear = settings.paidLeavesPerYear || 24; // Default fallback
+    
+    if (settings.locationLeaveSettings && settings.locationLeaveSettings.length > 0 && employee.location) {
+      const locationSetting = settings.locationLeaveSettings.find(
+        setting => setting.location._id.toString() === employee.location._id.toString()
+      );
+      
+      if (locationSetting) {
+        paidLeavesPerYear = locationSetting.paidLeavesPerYear;
+        
+      } else {
+        
+      }
+    } else {
+      
+    }
+
+    // Calculate pro-rated leaves for employees who joined this year (for display only)
+    const joinDate = new Date(employee.joinDate);
+    let calculatedYearlyAllocation = paidLeavesPerYear;
+    
+    if (!isNaN(joinDate.getTime())) {
+      const joinYear = joinDate.getFullYear();
+      const joinMonth = joinDate.getMonth();
+      const currentYear = new Date().getFullYear();
+      
+      if (joinYear === currentYear) {
+        const remainingMonths = 12 - joinMonth;
+        calculatedYearlyAllocation = Math.round((paidLeavesPerYear * remainingMonths) / 12);
+        
+      }
+    }
+
+    
+    
+    
+    
+    
+
+    // ✅ KEEP: Original employee data intact, add calculated values for display
+    let responseEmployee = {
+      ...employee,
+      // Add calculated values for frontend display without modifying core employee data
+      _displayCalculations: {
+        settingsBasedYearlyAllocation: paidLeavesPerYear,
+        calculatedYearlyAllocation: calculatedYearlyAllocation,
+        joinYear: joinDate.getFullYear(),
+        isProRated: joinDate.getFullYear() === new Date().getFullYear()
+      }
+    };
+
+    // Initialize monthly leaves (separate transaction) - this is for monthly leave tracking only
+    const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
+    const targetYear = year ? parseInt(year) : new Date().getFullYear();
+    
+    try {
+      const empSession = await mongoose.startSession();
+      try {
+        empSession.startTransaction();
+        const emp = await Employee.findById(id).session(empSession);
+        if (emp) {
+          await initializeMonthlyLeaves(emp, targetYear, targetMonth, empSession);
+          // ✅ ONLY update monthlyLeaves in response, not paidLeaves
+          responseEmployee.monthlyLeaves = emp.monthlyLeaves;
+          await empSession.commitTransaction();
+        } else {
+          await empSession.commitTransaction();
+        }
+      } catch (error) {
+        await empSession.abortTransaction();
+              } finally {
+        empSession.endSession();
+      }
+    } catch (sessionError) {
+          }
+
+    // Paginate documents
+    const documents = responseEmployee.documents || [];
+    const totalDocuments = documents.length;
+    const docSkip = (docPageNum - 1) * docLimitNum;
+    const paginatedDocuments = documents.slice(docSkip, docSkip + docLimitNum);
+    responseEmployee.documents = paginatedDocuments;
+    responseEmployee.documentsPagination = {
+      total: totalDocuments,
+      page: docPageNum,
+      limit: docLimitNum,
+      totalPages: Math.ceil(totalDocuments / docLimitNum),
+    };
+
+    // Paginate advances
+    const advances = responseEmployee.advances || [];
+    const totalAdvances = advances.length;
+    const advSkip = (advPageNum - 1) * advLimitNum;
+    const paginatedAdvances = advances.slice(advSkip, advSkip + advLimitNum);
+    responseEmployee.advances = paginatedAdvances;
+    responseEmployee.advancesPagination = {
+      total: totalAdvances,
+      page: advPageNum,
+      limit: advLimitNum,
+      totalPages: Math.ceil(totalAdvances / advLimitNum),
+    };
+
+    // Filter monthlyLeaves if month and year are provided
+    if (month && year) {
+      const parsedMonth = parseInt(month);
+      const parsedYear = parseInt(year);
+      if (isNaN(parsedMonth) || isNaN(parsedYear) || parsedMonth < 1 || parsedMonth > 12) {
+        return res.status(400).json({ message: 'Invalid month or year' });
+      }
+      responseEmployee.monthlyLeaves = (responseEmployee.monthlyLeaves || []).filter(
+        (ml) => ml.year === parsedYear && ml.month === parsedMonth
+      );
+    }
+
+    
+    res.set('Cache-Control', req.headers['cache-control'] || 'no-cache');
+    res.json({ employee: responseEmployee });
   } catch (error) {
+    
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+
 
 export const getAttendance = async (req, res) => {
   try {
@@ -503,6 +601,17 @@ if (existingEmployee) {
     const joinDateObj = new Date(joinDate);
     const paidLeavesPerMonth = settings.paidLeavesPerYear / 12;
 
+     // ✅ GET LOCATION NAME for Google Drive folder organization
+    let locationName = 'General'; // Default fallback
+    try {
+      const locationDoc = await Location.findById(requestedLocationId);
+      if (locationDoc) {
+        locationName = locationDoc.name;
+        
+      }
+    } catch (error) {
+          }
+
     const employeeData = {
       employeeId,
       name,
@@ -531,19 +640,37 @@ if (existingEmployee) {
       advanceHistory: [],
     };
 
+  // ✅ REPLACE: Local file storage with Google Drive upload
     if (req.files && req.files.length > 0) {
-      const uploadDir = path.join(__dirname, '..', '..', 'Uploads');
-      await fs.mkdir(uploadDir, { recursive: true });
-
-      for (const file of req.files) {
-        const filePath = `/Uploads/${file.filename}`;
-        employeeData.documents.push({
-          name: file.originalname,
-          path: filePath,
-          uploadedAt: new Date(),
-          size: file.size,
+      let googleDriveDocuments = [];
+      try {
+        
+        googleDriveDocuments = await googleDriveService.uploadMultipleFiles(req.files, employeeId, locationName);
+        
+      } catch (error) {
+        
+        return res.status(500).json({ 
+          message: `Failed to upload documents to Google Drive: ${error.message}` 
         });
       }
+
+      // ✅ Convert Google Drive metadata to document schema format
+      employeeData.documents = googleDriveDocuments.map(doc => ({
+        googleDriveId: doc.googleDriveId,
+        originalName: doc.originalName,
+        filename: doc.filename,
+        mimeType: doc.mimeType,
+        size: doc.size,
+        webViewLink: doc.webViewLink,
+        webContentLink: doc.webContentLink,
+        uploadedAt: doc.uploadedAt,
+        createdTime: doc.createdTime,
+        locationName: doc.locationName,
+        locationFolderId: doc.locationFolderId,
+        // Backward compatibility
+        name: doc.originalName,
+        path: doc.googleDriveId,
+      }));
     }
 
     const employee = new Employee(employeeData);
@@ -663,31 +790,37 @@ export const editEmployee = async (req, res) => {
       };
     }
 
-    if (paidLeaves) {
-      employee.paidLeaves = {
-        available: parseFloat(paidLeaves.available),
-        used: parseFloat(paidLeaves.used),
-        carriedForward: parseFloat(paidLeaves.carriedForward),
-      };
-      // Ensure monthlyLeaves is consistent with paidLeaves
-      const currentYear = new Date().getFullYear();
-      const currentMonth = new Date().getMonth() + 1;
-      let monthlyLeave = employee.monthlyLeaves.find(
-        (ml) => ml.year === currentYear && ml.month === currentMonth
-      );
-      if (!monthlyLeave) {
-        monthlyLeave = {
-          month: currentMonth,
-          year: currentYear,
-          allocated: paidLeavesPerMonth,
-          taken: 0,
-          carriedForward: 0,
-          available: paidLeavesPerMonth,
-        };
-        employee.monthlyLeaves.push(monthlyLeave);
-      }
-      monthlyLeave.available = paidLeaves.available / 12; // Sync with paidLeaves.available
-    }
+ if (paidLeaves) {
+  employee.paidLeaves = {
+    available: parseFloat(paidLeaves.available),
+    used: parseFloat(paidLeaves.used),
+    carriedForward: parseFloat(paidLeaves.carriedForward),
+  };
+  
+  // ✅ NEW: Set flag to prevent auto-calculation
+  employee.isManualPaidLeavesUpdate = true;
+  
+  // Ensure monthlyLeaves is consistent with paidLeaves
+  const currentYear = new Date().getFullYear();
+  const currentMonth = new Date().getMonth() + 1;
+  let monthlyLeave = employee.monthlyLeaves.find(
+    (ml) => ml.year === currentYear && ml.month === currentMonth
+  );
+  if (!monthlyLeave) {
+    monthlyLeave = {
+      month: currentMonth,
+      year: currentYear,
+      allocated: paidLeavesPerMonth,
+      taken: 0,
+      carriedForward: 0,
+      available: paidLeavesPerMonth,
+    };
+    employee.monthlyLeaves.push(monthlyLeave);
+  }
+  monthlyLeave.available = paidLeaves.available / 12; // Sync with paidLeaves.available
+}
+
+
 
     if (status) {
       employee.status = status;
@@ -884,7 +1017,8 @@ export const uploadDocument = async (req, res) => {
       return res.status(400).json({ message: 'Invalid employee ID' });
     }
 
-    const employee = await Employee.findById(id);
+    // ✅ FETCH EMPLOYEE WITH POPULATED LOCATION
+    const employee = await Employee.findById(id).populate('location');
     if (!employee) {
       return res.status(404).json({ message: 'Employee not found' });
     }
@@ -900,6 +1034,61 @@ export const uploadDocument = async (req, res) => {
       return res.status(400).json({ message: 'No documents uploaded' });
     }
 
+    // ✅ GET LOCATION NAME for Google Drive folder organization
+    const locationName = employee.location?.name || 'General';
+    
+
+    // ✅ UPLOAD FILES TO GOOGLE DRIVE
+    let googleDriveDocuments = [];
+    try {
+      
+      googleDriveDocuments = await googleDriveService.uploadMultipleFiles(req.files, employee.employeeId, locationName);
+      
+    } catch (error) {
+      
+      return res.status(500).json({ 
+        message: `Failed to upload documents to Google Drive: ${error.message}` 
+      });
+    }
+
+    // ✅ CONVERT TO DOCUMENT SCHEMA FORMAT
+    const newDocuments = googleDriveDocuments.map(doc => ({
+      googleDriveId: doc.googleDriveId,
+      originalName: doc.originalName,
+      filename: doc.filename,
+      mimeType: doc.mimeType,
+      size: doc.size,
+      webViewLink: doc.webViewLink,
+      webContentLink: doc.webContentLink,
+      uploadedAt: doc.uploadedAt,
+      createdTime: doc.createdTime,
+      locationName: doc.locationName,
+      locationFolderId: doc.locationFolderId,
+      // Backward compatibility
+      name: doc.originalName,
+      path: doc.googleDriveId,
+    }));
+
+    // ✅ ADD DOCUMENTS TO EMPLOYEE
+    employee.documents.push(...newDocuments);
+
+    try {
+      await employee.save();
+    } catch (error) {
+      // ✅ CLEANUP: Delete uploaded files if save fails
+      for (const doc of googleDriveDocuments) {
+        try {
+          await googleDriveService.deleteFile(doc.googleDriveId);
+        } catch (deleteError) {
+          
+        }
+      }
+      throw error;
+    }
+
+    // ✅ REMOVE: Old local file handling code
+    // DELETE THIS ENTIRE SECTION:
+    /*
     const uploadDir = path.join(__dirname, '..', '..', 'Uploads');
     await fs.mkdir(uploadDir, { recursive: true });
 
@@ -914,6 +1103,7 @@ export const uploadDocument = async (req, res) => {
     }
 
     await employee.save();
+    */
 
     const populatedEmployee = await Employee.findById(id)
       .populate('location', 'name address')
@@ -923,6 +1113,7 @@ export const uploadDocument = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 export const deleteEmployee = async (req, res) => {
   try {

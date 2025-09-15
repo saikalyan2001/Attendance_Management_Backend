@@ -5,6 +5,8 @@ import Employee from '../../models/Employee.js';
 import Location from '../../models/Location.js';
 import Settings from '../../models/Settings.js';
 import { format } from 'date-fns';
+import { getWorkingDaysForLocation } from './settingsController.js';
+import { isWorkingDay, getWorkingDayPolicyInfo, shouldCountForSalary } from '../../utils/workingDayValidator.js'; // ✅ UPDATED import
 
 
 // Utility to convert date to IST
@@ -32,6 +34,39 @@ function normalizeDate(dateInput) {
   return istDate.toISOString().replace('Z', '+05:30');
 }
 
+const validateAttendanceDate = async (employeeId, date, isException = false) => {
+  try {
+    const employee = await Employee.findById(employeeId).populate('location');
+    if (!employee) {
+      throw new Error('Employee not found');
+    }
+    
+    const settings = await Settings.findOne()
+      .populate('workingDayPolicies.locations')
+      .lean();
+    
+    const isWorking = isWorkingDay(settings, employee.location._id, date);
+    const policyInfo = getWorkingDayPolicyInfo(settings, employee.location._id);
+    
+    return {
+      isWorkingDay: isWorking,
+      policyInfo,
+      canMarkAttendance: isWorking || isException,
+      requiresException: !isWorking,
+      locationName: employee.location.name,
+      employee: employee
+    };
+  } catch (error) {
+    
+    return {
+      isWorkingDay: true,
+      canMarkAttendance: true,
+      requiresException: false,
+      error: error.message
+    };
+  }
+};
+
 function calculateProratedLeaves(joinDate, paidLeavesPerYear) {
   const join = new Date(joinDate);
   const joinYear = join.getFullYear();
@@ -45,14 +80,18 @@ function calculateProratedLeaves(joinDate, paidLeavesPerYear) {
   return paidLeavesPerYear;
 }
 
-// Correct all monthlyLeaves entries for an employee
+// ✅ ENHANCED: Correct monthly leaves with capped calculation
 async function correctMonthlyLeaves(employee, year, month, session) {
   let paidLeavesPerMonth = 2;
+  let settings = null;
+  
   try {
-    const settings = await Settings.findOne().lean().session(session);
+    settings = await Settings.findOne().lean().session(session);
     paidLeavesPerMonth = (settings?.paidLeavesPerYear || 24) / 12;
   } catch (e) {
-    // Fallback to default
+    
+    settings = { paidLeavesPerYear: 24 };
+    paidLeavesPerMonth = 2;
   }
 
   let totalTaken = 0;
@@ -63,6 +102,7 @@ async function correctMonthlyLeaves(employee, year, month, session) {
     return a.month - b.month;
   });
 
+  // Remove duplicates
   const uniqueLeaves = [];
   const seen = new Set();
   for (const ml of employee.monthlyLeaves) {
@@ -70,8 +110,6 @@ async function correctMonthlyLeaves(employee, year, month, session) {
     if (!seen.has(key)) {
       seen.add(key);
       uniqueLeaves.push(ml);
-    } else {
-
     }
   }
   employee.monthlyLeaves = uniqueLeaves;
@@ -93,8 +131,8 @@ async function correctMonthlyLeaves(employee, year, month, session) {
           month: m,
           allocated: paidLeavesPerMonth,
           taken: 0,
-          carriedForward: lastAvailable,
-          available: paidLeavesPerMonth + lastAvailable,
+          carriedForward: 0,
+          available: paidLeavesPerMonth,
         });
       }
     }
@@ -105,27 +143,145 @@ async function correctMonthlyLeaves(employee, year, month, session) {
     return a.month - b.month;
   });
 
+  // ✅ ENHANCED: Process carry forward with capped leave calculation
   for (let i = 0; i < employee.monthlyLeaves.length; i++) {
     const ml = employee.monthlyLeaves[i];
-    ml.taken = Math.max(ml.taken || 0, 0);
+    
+    if (ml.month === 1) {
+      lastAvailable = 0;
+    }
+    
     if (ml.year < year || (ml.year === year && ml.month <= month)) {
-      ml.carriedForward = lastAvailable;
-      ml.available = ml.allocated + ml.carriedForward - ml.taken;
+      if (i > 0) {
+        const prevMonth = employee.monthlyLeaves[i-1];
+        const hasAttendance = await hasAttendanceInMonth(employee._id, prevMonth.year, prevMonth.month);
+        
+        ml.carriedForward = hasAttendance ? Math.max(lastAvailable, 0) : 0;
+        
+        if (prevMonth.month === 12 && ml.month === 1) {
+          ml.carriedForward = 0;
+        }
+      } else {
+        ml.carriedForward = 0;
+      }
+
+      // ✅ ENHANCED: Calculate actual leave usage and cap it
+      const totalAllowedLeaves = ml.allocated + ml.carriedForward;
+      
+      // Calculate actual half-days and leaves taken this month
+      const startDate = `${ml.year}-${ml.month.toString().padStart(2, '0')}-01T00:00:00+05:30`;
+      const endDate = `${ml.year}-${ml.month.toString().padStart(2, '0')}-31T23:59:59+05:30`;
+      
+      const monthAttendance = await Attendance.find({
+        employee: employee._id,
+        date: { $gte: startDate, $lte: endDate },
+        status: { $in: ['leave', 'half-day'] },
+        isDeleted: false
+      }).session(session);
+
+      let actualLeaveEquivalent = 0;
+      monthAttendance.forEach(att => {
+        if (att.status === 'leave') {
+          actualLeaveEquivalent += 1;
+        } else if (att.status === 'half-day') {
+          actualLeaveEquivalent += 0.5;
+        }
+      });
+
+      // ✅ NEW: Cap the taken leaves to the allowed limit
+      ml.taken = Math.min(actualLeaveEquivalent, totalAllowedLeaves);
+      ml.available = Math.max(0, totalAllowedLeaves - ml.taken);
+
+      
     } else {
-      // For future months, only update available based on existing carriedForward
       ml.available = ml.allocated + ml.carriedForward - ml.taken;
     }
+    
     totalTaken += ml.taken;
     lastAvailable = Math.max(ml.available, 0);
   }
 
-  employee.paidLeaves.used = totalTaken;
-  employee.paidLeaves.available = 24 - totalTaken;
+  // Only update paidLeaves if not manually set
+  if (!employee.isManualPaidLeavesUpdate) {
+    const originalAllocated = employee.paidLeaves.available + employee.paidLeaves.used;
+    
+    employee.set('paidLeaves.used', totalTaken);
+    employee.set('paidLeaves.available', Math.max(0, originalAllocated - totalTaken));
+    
+    
+    
+  } else {
+    
+  }
+  
+  employee._skipAutoCalculation = true;
   await employee.save({ session });
+  employee._skipAutoCalculation = false;
 }
 
+const updateMonthlyPresence = async (employeeId, year, month, session) => {
+  
+  
+  try {
+    const employee = await Employee.findById(employeeId).populate('location').session(session);
+    if (!employee) return;
 
-// Initialize monthly leaves for a given year and month
+    const settings = await Settings.findOne()
+      .populate('workingDayPolicies.locations')
+      .lean()
+      .session(session);
+    
+    let workingDaysInMonth = 30;
+    
+    if (settings && employee.location) {
+      workingDaysInMonth = getWorkingDaysForLocation(settings, employee.location._id, year, month);
+    }
+
+    const startDate = `${year}-${month.toString().padStart(2, '0')}-01T00:00:00+05:30`;
+    const endDate = `${year}-${month.toString().padStart(2, '0')}-31T23:59:59+05:30`;
+    
+    const monthlyAttendance = await Attendance.find({
+      employee: employeeId,
+      date: { $gte: startDate, $lte: endDate },
+      isDeleted: false
+    }).session(session);
+
+    let totalPresence = 0;
+    for (const att of monthlyAttendance) {
+      if (shouldCountForSalary(att, settings, employee.location._id)) {
+        totalPresence += (att.presenceDays || 0);
+      }
+    }
+
+    let monthlyPresence = employee.monthlyPresence.find(
+      mp => mp.year === year && mp.month === month
+    );
+
+    if (!monthlyPresence) {
+      employee.monthlyPresence.push({
+        year: year,
+        month: month,
+        totalPresenceDays: totalPresence,
+        workingDaysInMonth: workingDaysInMonth,
+        lastUpdated: new Date()
+      });
+    } else {
+      monthlyPresence.totalPresenceDays = totalPresence;
+      monthlyPresence.workingDaysInMonth = workingDaysInMonth;
+      monthlyPresence.lastUpdated = new Date();
+    }
+
+    await employee.save({ session });
+    
+    
+    return totalPresence;
+    
+  } catch (error) {
+    
+    throw error;
+  }
+};
+
 async function initializeMonthlyLeaves(employee, year, month, session) {
   let paidLeavesPerMonth = 2;
   try {
@@ -140,7 +296,6 @@ async function initializeMonthlyLeaves(employee, year, month, session) {
   );
 
   if (!monthlyLeave) {
-    // Find previous month's data
     const prevMonth = month === 1 ? 12 : month - 1;
     const prevYear = month === 1 ? year - 1 : year;
     const prevMonthlyLeave = employee.monthlyLeaves.find(
@@ -161,7 +316,6 @@ async function initializeMonthlyLeaves(employee, year, month, session) {
     employee.monthlyLeaves.push(monthlyLeave);
     await employee.save({ session });
   } else {
-    // Correct negative taken values
     if (monthlyLeave.taken < 0) {
       monthlyLeave.taken = 0;
       monthlyLeave.available = monthlyLeave.allocated + monthlyLeave.carriedForward;
@@ -171,16 +325,18 @@ async function initializeMonthlyLeaves(employee, year, month, session) {
   return monthlyLeave;
 }
 
-// Update carry-forward for the next month
 async function updateNextMonthCarryforward(employeeId, year, month, available, session) {
   const nextMonth = month === 12 ? 1 : month + 1;
   const nextYear = month === 12 ? year + 1 : year;
 
-  // Fetch employee with session
-  const employee = await Employee.findById(employeeId).session(session);
-  if (!employee) return;
+  
 
-  // Find or initialize next month's leave record
+  const employee = await Employee.findById(employeeId).session(session);
+  if (!employee) {
+    
+    return;
+  }
+
   let nextMonthlyLeave = employee.monthlyLeaves.find(
     (ml) => ml.year === nextYear && ml.month === nextMonth
   );
@@ -194,19 +350,30 @@ async function updateNextMonthCarryforward(employeeId, year, month, available, s
   }
 
   if (!nextMonthlyLeave) {
+    const carriedForward = Math.max(available, 0);
+    const finalCarriedForward = (month === 12) ? 0 : carriedForward;
+    
+    
+    
     nextMonthlyLeave = {
       year: nextYear,
       month: nextMonth,
       allocated: paidLeavesPerMonth,
       taken: 0,
-      carriedForward: available,
-      available: paidLeavesPerMonth + available,
+      carriedForward: finalCarriedForward,
+      available: paidLeavesPerMonth + finalCarriedForward,
     };
     employee.monthlyLeaves.push(nextMonthlyLeave);
   } else {
-    nextMonthlyLeave.carriedForward = available;
-    nextMonthlyLeave.available = nextMonthlyLeave.allocated + available - Math.max(nextMonthlyLeave.taken, 0);
+    const carriedForward = Math.max(available, 0);
+    const finalCarriedForward = (month === 12) ? 0 : carriedForward;
+    
+    
+    
+    nextMonthlyLeave.carriedForward = finalCarriedForward;
+    nextMonthlyLeave.available = nextMonthlyLeave.allocated + finalCarriedForward - Math.max(nextMonthlyLeave.taken || 0, 0);
   }
+
 
   await employee.save({ session });
 }
@@ -226,7 +393,6 @@ async function executeWithRetry(operation, maxRetries = 3) {
       session.endSession();
       if (error.codeName === 'WriteConflict' && retries < maxRetries - 1) {
         retries++;
-
         await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, retries)));
         continue;
       }
@@ -236,6 +402,33 @@ async function executeWithRetry(operation, maxRetries = 3) {
   throw new Error('Max retries reached for transaction');
 }
 
+export async function hasAttendanceInMonth(employeeId, year, month) {
+  try {
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+    
+    const startStr = `${year}-${month.toString().padStart(2, '0')}-01T00:00:00+05:30`;
+    const endStr = `${year}-${month.toString().padStart(2, '0')}-${endDate.getDate()}T23:59:59+05:30`;
+    
+    
+    
+    
+    const count = await Attendance.countDocuments({
+      employee: employeeId,
+      date: { $gte: startStr, $lte: endStr },
+      status: { $in: ['present', 'leave', 'half-day'] },
+      isDeleted: false,
+    });
+    
+    
+    return count > 0;
+  } catch (error) {
+    
+    return false;
+  }
+}
+
+// ✅ ENHANCED: bulkMarkAttendance with unlimited half-days and capped calculations
 export const bulkMarkAttendance = async (req, res) => {
   try {
     const { attendance, overwrite = false } = req.body;
@@ -247,15 +440,19 @@ export const bulkMarkAttendance = async (req, res) => {
       });
     }
 
-    const settings = await Settings.findOne().lean();
+    const settings = await Settings.findOne()
+      .populate('workingDayPolicies.locations')
+      .lean();
     const paidLeavesPerMonth = (settings?.paidLeavesPerYear || 24) / 12;
 
     const attendanceRecords = [];
     const errors = [];
     const existingRecords = [];
+    const workingDayWarnings = [];
 
+    // Enhanced validation phase with working day checks
     for (const record of attendance) {
-      const { employeeId, date, status, location } = record;
+      const { employeeId, date, status, location, isException, exceptionReason, exceptionDescription } = record;
 
       if (!employeeId || !date || !status || !location) {
         errors.push({ message: `Missing required fields for employee ${employeeId}` });
@@ -275,17 +472,7 @@ export const bulkMarkAttendance = async (req, res) => {
         continue;
       }
 
-      const dateRegex = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{3})?(\+\d{2}:\d{2})$/;
-      if (!dateRegex.test(normalizedDate)) {
-        errors.push({ message: `Invalid date format for employee ${employeeId}: ${date}` });
-        continue;
-      }
-
       const targetDateTime = new Date(normalizedDate);
-      if (isNaN(targetDateTime.getTime())) {
-        errors.push({ message: `Invalid date for employee ${employeeId}: ${date}` });
-        continue;
-      }
       const targetDate = new Date(targetDateTime.getFullYear(), targetDateTime.getMonth(), targetDateTime.getDate());
       if (targetDate > new Date()) {
         errors.push({ message: `Cannot mark attendance for future date ${date} for employee ${employeeId}` });
@@ -302,6 +489,36 @@ export const bulkMarkAttendance = async (req, res) => {
       if (!locationExists) {
         errors.push({ message: `Location ${location} not found` });
         continue;
+      }
+
+      const validation = await validateAttendanceDate(employeeId, normalizedDate, isException);
+      
+      if (!validation.canMarkAttendance) {
+        errors.push({
+          message: `Cannot mark attendance for ${employee.name} on ${normalizedDate.split('T')[0]} - ${validation.policyInfo.policyName} excludes this day. Use exception marking if needed.`
+        });
+        continue;
+      }
+
+      if (validation.requiresException && !isException) {
+        workingDayWarnings.push({
+          employeeId,
+          employeeName: employee.name,
+          date: normalizedDate.split('T')[0],
+          policyInfo: validation.policyInfo,
+          message: `${employee.name}: ${normalizedDate.split('T')[0]} is not a working day per ${validation.policyInfo.policyName}. Consider marking as exception.`
+        });
+      }
+
+      if (isException) {
+        if (!exceptionReason) {
+          errors.push({ message: `Exception reason is required for ${employee.name} on non-working day` });
+          continue;
+        }
+        if (exceptionReason === 'other' && !exceptionDescription) {
+          errors.push({ message: `Exception description is required when reason is 'other' for ${employee.name}` });
+          continue;
+        }
       }
 
       const dateOnlyStr = normalizedDate.split('T')[0];
@@ -324,17 +541,28 @@ export const bulkMarkAttendance = async (req, res) => {
       const year = targetDateTime.getFullYear();
       const month = targetDateTime.getMonth() + 1;
       
-      // Only check leave availability for 'leave' status
+      // ✅ REMOVED: Half-day validation (allow unlimited half-days)
+      // ✅ KEEP: Only validate full leaves
       if (status === 'leave') {
         const monthlyLeave = employee.monthlyLeaves.find(
           (ml) => ml.year === year && ml.month === month
         );
         if (!monthlyLeave || monthlyLeave.available < 1) {
           errors.push({
-            message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves for ${month}/${year}`,
+            message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves (${monthlyLeave?.available || 0}) for full leave on ${month}/${year}`,
           });
           continue;
         }
+      }
+
+      // Calculate presence days for new record
+      let presenceDays = 0;
+      if (status === 'present') {
+        presenceDays = 1.0;
+      } else if (status === 'half-day') {
+        presenceDays = 0.5;
+      } else if (status === 'leave') {
+        presenceDays = 1.0;
       }
 
       attendanceRecords.push({
@@ -343,146 +571,225 @@ export const bulkMarkAttendance = async (req, res) => {
         status,
         location,
         markedBy: userId,
+        presenceDays: presenceDays,
+        isException: isException || false,
+        exceptionReason: exceptionReason || undefined,
+        exceptionDescription: exceptionDescription || undefined,
+        approvedBy: isException ? userId : undefined,
       });
     }
 
     if (errors.length > 0) {
-      return res.status(400).json({ message: 'Validation errors', errors });
+      return res.status(400).json({ 
+        message: 'Validation errors', 
+        errors,
+        workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
+      });
     }
 
     if (existingRecords.length > 0 && !overwrite) {
       return res.status(409).json({
         message: `Attendance already marked for ${existingRecords.length} employee(s)`,
         existingRecords,
+        workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
       });
     }
 
+    // Execute with retry
     const result = await executeWithRetry(async (session) => {
       const attendanceIds = [];
-      const errors = [];
+      const transactionErrors = [];
 
       for (const record of attendanceRecords) {
-        const { employee: employeeId, date, status, location } = record;
-        const targetDateTime = new Date(date);
-        const month = targetDateTime.getMonth() + 1;
-        const year = targetDateTime.getFullYear();
-        const dateOnlyStr = date.split('T')[0];
+        try {
+          const { employee: employeeId, date, status, location, presenceDays, isException, exceptionReason, exceptionDescription, approvedBy } = record;
+          const targetDateTime = new Date(date);
+          const month = targetDateTime.getMonth() + 1;
+          const year = targetDateTime.getFullYear();
+          const dateOnlyStr = date.split('T')[0];
 
-        const employee = await Employee.findById(employeeId).session(session);
-        await correctMonthlyLeaves(employee, year, month, session);
-        let monthlyLeave = await initializeMonthlyLeaves(employee, year, month, session);
+          
 
-        const existingRecord = await Attendance.findOne({
-          employee: employeeId,
-          location,
-          date: { $regex: `^${dateOnlyStr}`, $options: 'i' },
-          isDeleted: false,
-        }).session(session);
+          const employee = await Employee.findById(employeeId).session(session);
+          if (!employee) {
+            transactionErrors.push({ message: `Employee ${employeeId} not found in transaction` });
+            continue;
+          }
 
-        let leaveAdjustment = 0;
-        let monthlyLeaveAdjustment = 0;
+          await correctMonthlyLeaves(employee, year, month, session);
+          let monthlyLeave = await initializeMonthlyLeaves(employee, year, month, session);
 
-        if (existingRecord) {
-          const oldStatus = existingRecord.status;
-          if (oldStatus !== status) {
-            // Only adjust for leave status changes
-            if (oldStatus === 'leave') {
-              leaveAdjustment -= 1;
-              monthlyLeaveAdjustment -= 1;
+          
+
+          const existingRecord = await Attendance.findOne({
+            employee: employeeId,
+            location,
+            date: { $regex: `^${dateOnlyStr}`, $options: 'i' },
+            isDeleted: false,
+          }).session(session);
+
+          let leaveAdjustment = 0;
+          let monthlyLeaveAdjustment = 0;
+
+          if (existingRecord) {
+            const oldStatus = existingRecord.status;
+            
+            
+            if (oldStatus !== status) {
+              // Handle leave adjustments for old status
+              if (oldStatus === 'leave') {
+                leaveAdjustment -= 1;
+                monthlyLeaveAdjustment -= 1;
+              } else if (oldStatus === 'half-day') {
+                leaveAdjustment -= 0.5;
+                monthlyLeaveAdjustment -= 0.5;
+              }
+              
+              // Handle leave adjustments for new status
+              if (status === 'leave') {
+                if (monthlyLeave.available + monthlyLeaveAdjustment < 1) {
+                  transactionErrors.push({
+                    message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves for full leave on ${month}/${year}`,
+                  });
+                  continue;
+                }
+                leaveAdjustment += 1;
+                monthlyLeaveAdjustment += 1;
+              } else if (status === 'half-day') {
+                // ✅ REMOVED: Half-day validation
+                leaveAdjustment += 0.5;
+                monthlyLeaveAdjustment += 0.5;
+              }
+
+              // Update existing record
+              existingRecord.status = status;
+              existingRecord.date = date;
+              existingRecord.markedBy = userId;
+              existingRecord.presenceDays = presenceDays;
+              existingRecord.isException = isException || false;
+              existingRecord.exceptionReason = exceptionReason;
+              existingRecord.exceptionDescription = exceptionDescription;
+              existingRecord.approvedBy = approvedBy;
+              await existingRecord.save({ session });
+              attendanceIds.push(existingRecord._id.toString());
+            } else {
+              attendanceIds.push(existingRecord._id.toString());
             }
+          } else {
+            
+            
+            // New record - handle leave adjustments
             if (status === 'leave') {
               if (monthlyLeave.available < 1) {
-                errors.push({
-                  message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves for ${month}/${year}`,
+                transactionErrors.push({
+                  message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves for full leave on ${month}/${year}`,
                 });
                 continue;
               }
-              leaveAdjustment += 1;
-              monthlyLeaveAdjustment += 1;
+              leaveAdjustment = 1;
+              monthlyLeaveAdjustment = 1;
+            } else if (status === 'half-day') {
+              // ✅ REMOVED: Half-day validation - allow unlimited half-days
+              leaveAdjustment = 0.5;
+              monthlyLeaveAdjustment = 0.5;
             }
 
-            existingRecord.status = status;
-            existingRecord.date = date;
-            existingRecord.markedBy = userId;
-            await existingRecord.save({ session });
-            attendanceIds.push(existingRecord._id.toString());
-          } else {
-            attendanceIds.push(existingRecord._id.toString());
-            // Update carryforward regardless of status
-            await updateNextMonthCarryforward(employeeId, year, month, monthlyLeave.available, session);
-            continue;
-          }
-        } else {
-          // Only adjust for new leave records
-          if (status === 'leave') {
-            if (monthlyLeave.available < 1) {
-              errors.push({
-                message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves for ${month}/${year}`,
-              });
-              continue;
-            }
-            leaveAdjustment = 1;
-            monthlyLeaveAdjustment = 1;
+            const newRecord = new Attendance({
+              employee: employeeId,
+              date,
+              status,
+              location,
+              markedBy: userId,
+              presenceDays: presenceDays,
+              isException: isException || false,
+              exceptionReason: exceptionReason,
+              exceptionDescription: exceptionDescription,
+              approvedBy: approvedBy,
+            });
+            await newRecord.save({ session });
+            attendanceIds.push(newRecord._id.toString());
           }
 
-          const newRecord = new Attendance({
-            employee: employeeId,
-            date,
-            status,
-            location,
-            markedBy: userId,
-          });
-          await newRecord.save({ session });
-          attendanceIds.push(newRecord._id.toString());
-        }
+          
 
-        // Update leave balances if there are adjustments
-        if (leaveAdjustment !== 0 || monthlyLeaveAdjustment !== 0) {
-          monthlyLeave.taken = Math.max(monthlyLeave.taken + monthlyLeaveAdjustment, 0);
-          monthlyLeave.available = monthlyLeave.allocated + monthlyLeave.carriedForward - monthlyLeave.taken;
-        }
+          // ✅ ENHANCED: Update leave balances with capping logic
+          if (leaveAdjustment !== 0 || monthlyLeaveAdjustment !== 0) {
+            // Calculate total leave equivalent taken this month
+            const totalLeaveEquivalent = monthlyLeave.taken + monthlyLeaveAdjustment;
+            
+            // ✅ NEW: Cap the used leaves to monthly allocation
+            const monthlyAllocation = monthlyLeave.allocated + monthlyLeave.carriedForward;
+            const cappedUsed = Math.min(totalLeaveEquivalent, monthlyAllocation);
+            
+            // Update monthly leaves with capped values
+            monthlyLeave.taken = cappedUsed;
+            monthlyLeave.available = Math.max(0, monthlyAllocation - cappedUsed);
 
-        // Always update carryforward regardless of status
-        await updateNextMonthCarryforward(employeeId, year, month, monthlyLeave.available, session);
+            
 
-        if (leaveAdjustment !== 0 || monthlyLeaveAdjustment !== 0) {
-          await Employee.findByIdAndUpdate(
-            employeeId,
-            {
-              $inc: {
-                'paidLeaves.available': -leaveAdjustment,
-                'paidLeaves.used': leaveAdjustment,
-              },
+            const updateQuery = {
               $set: {
-                'monthlyLeaves.$[elem].taken': monthlyLeave.taken,
+                'monthlyLeaves.$[elem].taken': cappedUsed,
                 'monthlyLeaves.$[elem].available': monthlyLeave.available,
               },
-            },
-            {
-              arrayFilters: [{ 'elem.year': year, 'elem.month': month }],
-              session,
-              new: true,
+            };
+
+            // Only update paidLeaves if not manually set
+            if (!employee.isManualPaidLeavesUpdate) {
+              // ✅ ENHANCED: Use capped value for paidLeaves update
+              const currentPaidUsed = employee.paidLeaves.used || 0;
+              const maxAllowedIncrease = Math.max(0, monthlyAllocation - currentPaidUsed);
+              const cappedPaidLeaveAdjustment = Math.min(leaveAdjustment, maxAllowedIncrease);
+              
+              updateQuery.$inc = {
+                'paidLeaves.available': -cappedPaidLeaveAdjustment,
+                'paidLeaves.used': cappedPaidLeaveAdjustment,
+              };
+              
             }
-          );
+
+            await Employee.findByIdAndUpdate(
+              employeeId,
+              updateQuery,
+              {
+                arrayFilters: [{ 'elem.year': year, 'elem.month': month }],
+                session,
+                new: true,
+              }
+            );
+          }
+
+          // Always update monthly presence after any attendance change
+          await updateMonthlyPresence(employeeId, year, month, session);
+          await updateNextMonthCarryforward(employeeId, year, month, monthlyLeave.available, session);
+
+          
+        } catch (recordError) {
+          
+          transactionErrors.push({ 
+            message: `Error processing employee ${record.employee}: ${recordError.message}` 
+          });
         }
       }
 
-      if (errors.length > 0) {
-        throw new Error('Validation errors during transaction');
-      }
-
-      return { attendanceIds, errors };
+      return { attendanceIds, errors: transactionErrors };
     });
 
-    if (result.errors.length > 0) {
-      return res.status(400).json({ message: 'Validation errors', errors: result.errors });
+    if (result.errors && result.errors.length > 0) {
+      
+      return res.status(400).json({ 
+        message: 'Validation errors during attendance processing', 
+        errors: result.errors 
+      });
     }
 
     res.status(201).json({
       message: 'Bulk attendance marked successfully',
       attendanceIds: result.attendanceIds,
+      workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
     });
   } catch (error) {
+    
     if (error.code === 11000) {
       return res.status(409).json({
         message: 'Attendance already marked for some employees',
@@ -494,7 +801,7 @@ export const bulkMarkAttendance = async (req, res) => {
   }
 };
 
-
+// Continue with existing functions but update markAttendance similarly
 export const markAttendance = async (req, res) => {
   const result = await executeWithRetry(async (session) => {
     const attendanceRecords = Array.isArray(req.body) ? req.body : [req.body];
@@ -504,7 +811,7 @@ export const markAttendance = async (req, res) => {
     const errors = [];
 
     for (const record of attendanceRecords) {
-      const { employeeId, date, status, location } = record;
+      const { employeeId, date, status, location, isException, exceptionReason, exceptionDescription } = record;
       if (!employeeId || !date || !status || !location) {
         errors.push({ message: `Missing required fields for employee ${employeeId}` });
         continue;
@@ -552,6 +859,15 @@ export const markAttendance = async (req, res) => {
         continue;
       }
 
+      const validation = await validateAttendanceDate(employeeId, normalizedDate, isException);
+      
+      if (!validation.canMarkAttendance) {
+        errors.push({
+          message: `Cannot mark attendance for ${employee.name} on ${normalizedDate.split('T')[0]} - ${validation.policyInfo.policyName} excludes this day. Use exception marking if needed.`
+        });
+        continue;
+      }
+
       const dateOnlyStr = normalizedDate.split('T')[0];
       const existingRecord = await Attendance.findOne({
         employee: employeeId,
@@ -568,15 +884,14 @@ export const markAttendance = async (req, res) => {
       const month = targetDateTime.getMonth() + 1;
       const year = targetDateTime.getFullYear();
 
-      // Initialize monthly leaves for all status types
       await correctMonthlyLeaves(employee, year, month, session);
       let monthlyLeave = await initializeMonthlyLeaves(employee, year, month, session);
 
-      // Only check leave availability for 'leave' status
+      // ✅ REMOVED: Half-day validation - only validate full leaves
       if (status === 'leave') {
         if (monthlyLeave.available < 1) {
           errors.push({
-            message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves (${monthlyLeave.available}) for ${status} on ${month}/${year}`,
+            message: `Employee ${employee.name} (${employee.employeeId}) has insufficient leaves (${monthlyLeave.available}) for full leave on ${month}/${year}`,
           });
           continue;
         }
@@ -584,11 +899,22 @@ export const markAttendance = async (req, res) => {
 
       let leaveAdjustment = 0;
       let monthlyLeaveAdjustment = 0;
-      
-      // Only adjust for 'leave' status
+      let presenceDays = 0;
+
+      // Handle leave adjustments and presence days
       if (status === 'leave') {
         leaveAdjustment = 1;
         monthlyLeaveAdjustment = 1;
+        presenceDays = 1.0;
+      } else if (status === 'half-day') {
+        // ✅ ALLOW: Unlimited half-days
+        leaveAdjustment = 0.5;
+        monthlyLeaveAdjustment = 0.5;
+        presenceDays = 0.5;
+      } else if (status === 'present') {
+        presenceDays = 1.0;
+      } else {
+        presenceDays = 0; // absent
       }
 
       const attendance = new Attendance({
@@ -597,32 +923,47 @@ export const markAttendance = async (req, res) => {
         status,
         location,
         markedBy: req.user?._id || null,
+        presenceDays: presenceDays,
+        isException: isException || false,
+        exceptionReason: exceptionReason,
+        exceptionDescription: exceptionDescription,
+        approvedBy: isException ? req.user?._id : undefined,
       });
       await attendance.save({ session });
       attendanceIds.push(attendance._id.toString());
 
-      // Update leave balances if there are adjustments
+      // ✅ ENHANCED: Update leave balances with capping
       if (leaveAdjustment !== 0 || monthlyLeaveAdjustment !== 0) {
-        monthlyLeave.taken = Math.max(monthlyLeave.taken + monthlyLeaveAdjustment, 0);
-        monthlyLeave.available = monthlyLeave.allocated + monthlyLeave.carriedForward - monthlyLeave.taken;
+        const totalLeaveEquivalent = monthlyLeave.taken + monthlyLeaveAdjustment;
+        const monthlyAllocation = monthlyLeave.allocated + monthlyLeave.carriedForward;
+        const cappedUsed = Math.min(totalLeaveEquivalent, monthlyAllocation);
+        
+        monthlyLeave.taken = cappedUsed;
+        monthlyLeave.available = Math.max(0, monthlyAllocation - cappedUsed);
       }
 
-      // Always update carryforward regardless of status
       await updateNextMonthCarryforward(employeeId, year, month, monthlyLeave.available, session);
+
+      const updateQuery = {
+        $set: {
+          'monthlyLeaves.$[elem].taken': monthlyLeave.taken,
+          'monthlyLeaves.$[elem].available': monthlyLeave.available,
+        },
+      };
+
+      // Only update paidLeaves if not manually set
+      if (!employee.isManualPaidLeavesUpdate && leaveAdjustment !== 0) {
+        const cappedPaidLeaveAdjustment = Math.min(leaveAdjustment, monthlyLeave.allocated + monthlyLeave.carriedForward - (employee.paidLeaves.used || 0));
+        updateQuery.$inc = {
+          'paidLeaves.available': -cappedPaidLeaveAdjustment,
+          'paidLeaves.used': cappedPaidLeaveAdjustment,
+        };
+      }
 
       if (leaveAdjustment !== 0 || monthlyLeaveAdjustment !== 0) {
         await Employee.findByIdAndUpdate(
           employeeId,
-          {
-            $inc: {
-              'paidLeaves.available': -leaveAdjustment,
-              'paidLeaves.used': leaveAdjustment,
-            },
-            $set: {
-              'monthlyLeaves.$[elem].taken': monthlyLeave.taken,
-              'monthlyLeaves.$[elem].available': monthlyLeave.available,
-            },
-          },
+          updateQuery,
           {
             arrayFilters: [{ 'elem.year': year, 'elem.month': month }],
             session,
@@ -630,6 +971,8 @@ export const markAttendance = async (req, res) => {
           }
         );
       }
+
+      await updateMonthlyPresence(employeeId, year, month, session);
     }
 
     if (errors.length > 0) {
@@ -643,6 +986,63 @@ export const markAttendance = async (req, res) => {
 };
 
 
+export const getLocationWorkingDayPolicy = async (req, res) => {
+  
+  
+  
+  
+  try {
+    const { locationId, date } = req.query;
+    
+
+    if (!locationId) {
+      
+      return res.status(400).json({ message: 'Location ID is required' });
+    }
+
+    
+    const settings = await Settings.findOne()
+      .populate('workingDayPolicies.locations')
+      .lean();
+    
+ 
+    const policy = getWorkingDayPolicyInfo(settings, locationId);
+    const isWorking = date ? isWorkingDay(settings, locationId, date) : null;
+
+    
+
+    const response = {
+      policy,
+      isWorkingDay: isWorking,
+      date: date || null
+    };
+
+    
+    res.json(response);
+  } catch (error) {
+    
+    res.status(500).json({ message: 'Server error while getting working day policy' });
+  }
+};
+
+export const validateAttendanceDateEndpoint = async (req, res) => {
+  try {
+    const { employeeId, date, isException } = req.query;
+
+    if (!employeeId || !date) {
+      return res.status(400).json({ message: 'Employee ID and date are required' });
+    }
+
+    const validation = await validateAttendanceDate(employeeId, date, isException === 'true');
+    
+    res.json(validation);
+  } catch (error) {
+    
+    res.status(500).json({ message: 'Server error while validating attendance date' });
+  }
+};
+
+// Rest of the existing functions remain the same
 export const undoMarkAttendance = async (req, res) => {
   const result = await executeWithRetry(async (session) => {
     const { attendanceIds } = req.body;
@@ -787,9 +1187,6 @@ export const editAttendance = async (req, res) => {
         leaveAdjustment -= 1;
         monthlyLeaveAdjustment -= 1;
       } else if (status === 'half-day') {
-        if (monthlyLeave.available < 0.5) {
-          throw new Error(`Employee ${employee.name} has insufficient leaves`);
-        }
         leaveAdjustment -= 0.5;
         monthlyLeaveAdjustment -= 0.5;
       }
@@ -833,8 +1230,7 @@ export const editAttendance = async (req, res) => {
 
 export const getAttendance = async (req, res) => {
   try {
-    // ✅ FIX: Get employeeId from URL params, not query
-    const { id: employeeId } = req.params;  // Changed from req.query.employeeId
+    const { id: employeeId } = req.params;
     const { month, year, location, date, status, page = 1, limit = 5 } = req.query;
 
     const parsedPage = parseInt(page, 10);
@@ -846,19 +1242,116 @@ export const getAttendance = async (req, res) => {
       return res.status(400).json({ message: 'Invalid limit value (must be between 1 and 100)' });
     }
 
-    const match = { isDeleted: false };
-
-    if (month && year) {
-      if (isNaN(month) || isNaN(year) || month < 1 || month > 12) {
-        return res.status(400).json({ message: 'Invalid month or year format' });
+    // ✅ UPDATED: For monthly attendance, paginate EMPLOYEES not attendance records
+    if (month && year && !employeeId) {
+      // Build employee query first
+      const employeeMatch = { isDeleted: false };
+      
+      if (location && location !== 'all') {
+        if (!mongoose.Types.ObjectId.isValid(location)) {
+          return res.status(400).json({ message: 'Invalid location ID format' });
+        }
+        const locationExists = await Location.findById(location).lean();
+        if (!locationExists) {
+          return res.status(400).json({ message: 'Location not found' });
+        }
+        employeeMatch.location = new mongoose.Types.ObjectId(location);
       }
+
+      // Get total employee count for pagination
+      const totalEmployees = await Employee.countDocuments(employeeMatch);
+      const totalPages = Math.ceil(totalEmployees / parsedLimit);
+      const skip = (parsedPage - 1) * parsedLimit;
+
+      // Get paginated employees
+      const employees = await Employee.find(employeeMatch)
+        .populate('location', 'name')
+        .sort({ employeeId: 1 })
+        .skip(skip)
+        .limit(parsedLimit)
+        .lean();
+
+      if (employees.length === 0) {
+        return res.status(200).json({
+          attendance: [],
+          pagination: {
+            currentPage: parsedPage,
+            totalPages,
+            totalItems: totalEmployees,
+            itemsPerPage: parsedLimit,
+          },
+        });
+      }
+
+      const employeeIds = employees.map(emp => emp._id);
+
+      // Get ALL attendance records for these employees for the entire month
       const monthNum = parseInt(month);
       const yearNum = parseInt(year);
       const startStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-01T00:00:00+05:30`;
       const endStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-${new Date(yearNum, monthNum, 0).getDate()}T23:59:59+05:30`;
-      match.date = { $gte: startStr, $lte: endStr };
-    } else {
-      return res.status(400).json({ message: 'Month and year are required for attendance filtering' });
+      
+      let attendanceMatch = {
+        employee: { $in: employeeIds },
+        date: { $gte: startStr, $lte: endStr },
+        isDeleted: false,
+      };
+
+      if (location && location !== 'all') {
+        attendanceMatch.location = new mongoose.Types.ObjectId(location);
+      }
+
+      if (status && status !== 'all') {
+        if (!['present', 'absent', 'leave', 'half-day'].includes(status)) {
+          return res.status(400).json({ message: 'Invalid status' });
+        }
+        attendanceMatch.status = status;
+      }
+
+      const attendanceRecords = await Attendance.find(attendanceMatch)
+        .populate('employee', 'employeeId name')
+        .populate('location', 'name')
+        .lean();
+
+      // ✅ NEW: Structure the response as array of {employee, attendance[]}
+      const employeeAttendanceData = employees.map(employee => ({
+        employee: employee,
+        attendance: attendanceRecords.filter(att => 
+          att.employee._id.toString() === employee._id.toString()
+        )
+      }));
+
+      // Correct monthly leaves for each employee
+      for (const empData of employeeAttendanceData) {
+        const employee = await Employee.findById(empData.employee._id);
+        if (employee) {
+          await correctMonthlyLeaves(employee, yearNum, monthNum, null);
+        }
+      }
+
+      return res.status(200).json({
+        attendance: employeeAttendanceData, // ✅ NEW: Array of {employee, attendance[]}
+        pagination: {
+          currentPage: parsedPage,
+          totalPages,
+          totalItems: totalEmployees,
+          itemsPerPage: parsedLimit,
+        },
+      });
+    }
+
+    // ✅ EXISTING: Handle single employee or other cases (unchanged)
+    const match = { isDeleted: false };
+
+    if (employeeId) {
+      if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+        return res.status(400).json({ message: 'Invalid employee ID format' });
+      }
+      const employeeExists = await Employee.findById(employeeId).lean();
+      if (!employeeExists) {
+        return res.status(400).json({ message: 'Employee not found' });
+      }
+      match.employee = new mongoose.Types.ObjectId(employeeId);
     }
 
     if (location && location !== 'all') {
@@ -879,6 +1372,12 @@ export const getAttendance = async (req, res) => {
       }
       const dateStr = date.split('T')[0];
       match.date = { $regex: `^${dateStr}`, $options: 'i' };
+    } else if (month && year) {
+      const monthNum = parseInt(month);
+      const yearNum = parseInt(year);
+      const startStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-01T00:00:00+05:30`;
+      const endStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-${new Date(yearNum, monthNum, 0).getDate()}T23:59:59+05:30`;
+      match.date = { $gte: startStr, $lte: endStr };
     }
 
     if (status) {
@@ -886,24 +1385,6 @@ export const getAttendance = async (req, res) => {
         return res.status(400).json({ message: 'Invalid status' });
       }
       match.status = status;
-    }
-
-    // ✅ FIX: Always filter by employeeId when it's provided via URL params
-    if (employeeId) {
-      if (!mongoose.Types.ObjectId.isValid(employeeId)) {
-        return res.status(400).json({ message: 'Invalid employee ID format' });
-      }
-      const employeeExists = await Employee.findById(employeeId).lean();
-      if (!employeeExists) {
-        return res.status(400).json({ message: 'Employee not found' });
-      }
-      match.employee = new mongoose.Types.ObjectId(employeeId);
-    }
-
-    // ✅ FIX: Use single-employee pagination logic since we always have employeeId from URL
-    const employee = await Employee.findById(employeeId);
-    if (employee) {
-      await correctMonthlyLeaves(employee, parseInt(year), parseInt(month), null);
     }
 
     const totalItems = await Attendance.countDocuments(match);
@@ -922,7 +1403,7 @@ export const getAttendance = async (req, res) => {
         select: 'name',
         options: { lean: true },
       })
-      .sort({ date: -1 }) // Sort by date descending
+      .sort({ date: -1 })
       .skip(skip)
       .limit(parsedLimit)
       .lean();
@@ -942,6 +1423,9 @@ export const getAttendance = async (req, res) => {
         },
         date: record.date,
         status: record.status,
+        isException: record.isException || false,
+        exceptionReason: record.exceptionReason,
+        exceptionDescription: record.exceptionDescription,
         monthlyLeaves: record.employee.monthlyLeaves.filter(
           (ml) => month && year && ml.year === parseInt(year) && ml.month === parseInt(month)
         ),
@@ -961,14 +1445,11 @@ export const getAttendance = async (req, res) => {
   }
 };
 
-
-
-
+// Continue with all remaining existing functions...
 export const getAttendanceRequests = async (req, res) => {
   try {
     const { location, date, status, page = 1, limit = 5 } = req.query;
 
-    // Parse pagination parameters
     const parsedPage = parseInt(page, 10);
     const parsedLimit = parseInt(limit, 10);
     if (isNaN(parsedPage) || parsedPage < 1) {
@@ -978,9 +1459,8 @@ export const getAttendanceRequests = async (req, res) => {
       return res.status(400).json({ message: 'Invalid limit value (must be between 1 and 100)' });
     }
 
-    const match = { status: { $ne: 'deleted' } }; // Assuming soft delete with status field
+    const match = { status: { $ne: 'deleted' } };
 
-    // Validate and add location to match
     if (location && location !== 'all') {
       if (!mongoose.Types.ObjectId.isValid(location)) {
         return res.status(400).json({ message: 'Invalid location ID format' });
@@ -992,7 +1472,6 @@ export const getAttendanceRequests = async (req, res) => {
       match.location = new mongoose.Types.ObjectId(location);
     }
 
-    // Validate and add date to match
     if (date) {
       const inputDate = new Date(date);
       if (isNaN(inputDate.getTime())) {
@@ -1002,7 +1481,6 @@ export const getAttendanceRequests = async (req, res) => {
       match.date = { $regex: `^${dateStr}`, $options: 'i' };
     }
 
-    // Validate and add status to match
     if (status && status !== 'all') {
       if (!['pending', 'approved', 'rejected'].includes(status)) {
         return res.status(400).json({ message: 'Invalid status' });
@@ -1010,12 +1488,10 @@ export const getAttendanceRequests = async (req, res) => {
       match.status = status;
     }
 
-    // Get total count for pagination
     const totalItems = await AttendanceRequest.countDocuments(match).exec();
     const totalPages = Math.ceil(totalItems / parsedLimit);
     const skip = (parsedPage - 1) * parsedLimit;
 
-    // Fetch paginated attendance requests
     const requests = await AttendanceRequest.find(match)
       .populate({
         path: 'employee',
@@ -1028,24 +1504,21 @@ export const getAttendanceRequests = async (req, res) => {
         select: 'name',
         options: { lean: true },
       })
-      .sort({ date: -1 }) // Sort by date descending
+      .sort({ date: -1 })
       .skip(skip)
       .limit(parsedLimit)
       .lean();
 
-    // Map over requests to add currentStatus from Attendance
     const requestsWithCurrentStatus = await Promise.all(
       requests.map(async (request) => {
-        // Check if employee or location is null
         if (!request.employee || !request.location) {
-
           return {
             ...request,
             currentStatus: 'N/A',
           };
         }
 
-        const dateOnlyStr = request.date.split('T')[0]; // Extract YYYY-MM-DD
+        const dateOnlyStr = request.date.split('T')[0];
         const attendance = await Attendance.findOne({
           employee: request.employee._id,
           location: request.location._id,
@@ -1073,7 +1546,6 @@ export const getAttendanceRequests = async (req, res) => {
     res.status(500).json({ message: `Server error while fetching attendance requests: ${error.message}` });
   }
 };
-
 
 export const handleAttendanceRequest = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1189,10 +1661,7 @@ export const handleAttendanceRequest = async (req, res) => {
     res.json({ message: `Request ${status} successfully`, request });
   } catch (error) {
     await session.abortTransaction();
-    ('Handle attendance request error:', {
-      message: error.message,
-      stack: error.stack,
-    });
+  
     res.status(500).json({ message: 'Server error while handling attendance request' });
   } finally {
     session.endSession();
@@ -1244,10 +1713,6 @@ export const requestAttendanceEdit = async (req, res) => {
     await request.save();
     res.status(201).json(request);
   } catch (error) {
-    ('Request attendance edit error:', {
-      message: error.message,
-      stack: error.stack,
-    });
     res.status(500).json({ message: 'Server error while requesting attendance edit' });
   }
 };
@@ -1287,9 +1752,11 @@ export const exportAttendance = async (req, res) => {
       Location: record.location?.name || 'N/A',
       Date: record.date,
       Status: record.status.charAt(0).toUpperCase() + record.status.slice(1),
+      Exception: record.isException ? 'Yes' : 'No',
+      ExceptionReason: record.exceptionReason || 'N/A',
     }));
 
-    const csvHeaders = ['Employee', 'Location', 'Date', 'Status'];
+    const csvHeaders = ['Employee', 'Location', 'Date', 'Status', 'Exception', 'ExceptionReason'];
     const csvRows = [csvHeaders.join(',')];
     csvData.forEach((row) => {
       const values = csvHeaders.map((header) => `"${row[header]}"`);
@@ -1304,14 +1771,6 @@ export const exportAttendance = async (req, res) => {
     );
     res.send(csvContent);
   } catch (error) {
-    ('Export attendance error:', {
-      message: error.message,
-      stack: error.stack,
-    });
     res.status(500).json({ message: 'Server error while exporting attendance' });
   }
 };
-
-
-
-

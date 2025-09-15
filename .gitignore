@@ -16,3 +16,5 @@ coverage/
 # OS & IDE
 .DS_Store
 Thumbs.db
+
+config/service-account-key.json

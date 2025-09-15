@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "server": "nodemon server.js"
+    "server": "nodemon server.js",
+    "recalculate-leaves": "node scripts/recalculateLeaveBalances.js"
   },
   "type": "module",
   "keywords": [],
@@ -19,9 +20,10 @@
     "csv-parse": "^6.0.0",
     "date-fns": "^3.6.0",
     "dotenv": "^16.5.0",
-    "express": "^4.21.0", 
+    "express": "^4.21.0",
     "express-async-handler": "^1.2.0",
     "express-validator": "^7.2.1",
+    "googleapis": "^159.0.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "luxon": "^3.6.1",
@@ -34,6 +36,7 @@
     "puppeteer": "^24.11.1",
     "react-csv": "^2.2.2",
     "redis": "^5.8.0",
+    "uuid": "^13.0.0",
     "winston": "^3.17.0",
     "xlsx": "^0.18.5"
   },

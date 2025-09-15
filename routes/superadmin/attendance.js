@@ -9,6 +9,8 @@ import {
   requestAttendanceEdit,
   exportAttendance,
   undoMarkAttendance,
+  getLocationWorkingDayPolicy, // ✅ NEW
+  validateAttendanceDateEndpoint, // ✅ NEW
 } from '../../controllers/admin/attendanceController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 
@@ -26,5 +28,7 @@ router.post('/attendance/requests', requestAttendanceEdit);
 router.put('/attendance/requests/:id', handleAttendanceRequest);
 router.get('/attendance/export', exportAttendance);
 router.post('/attendance/undo', undoMarkAttendance);
+router.get('/attendance/working-day-policy', getLocationWorkingDayPolicy);
+router.get('/attendance/validate-date', validateAttendanceDateEndpoint);
 
 export default router;

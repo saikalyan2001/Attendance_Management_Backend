@@ -10,6 +10,8 @@ import Location from "../../models/Location.js";
 import xlsx from "xlsx";
 import AppError from "../../utils/AppError.js";
 import Attendance from "../../models/Attendance.js";
+import googleDriveService from '../../utils/googleDriveService.js';
+
 
 // Helper function to calculate prorated leaves
 const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {
@@ -167,7 +169,20 @@ const checkEmployeeExists = asyncHandler(async (req, res) => {
 // @route   GET /api/admin/employees?page=<page>&limit=<limit>
 // @access  Private/Admin
 const getEmployees = asyncHandler(async (req, res) => {
-  const { location, status, department, search, month, year, page = 1, limit = 10, isDeleted } = req.query;
+  const { location, status, department, search, month, year, page = 1, limit = 10, isDeleted, _cacheBuster, cacheBuster } = req.query;
+
+    // ✅ ADD: Cache busting headers when cache buster is present
+  if (_cacheBuster || cacheBuster) {
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'ETag': false,
+      'Last-Modified': false
+    });
+    
+  }
+
   let query = {};
   
   if (isDeleted !== undefined) {
@@ -363,6 +378,8 @@ const getEmployees = asyncHandler(async (req, res) => {
 const getEmployeeById = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { _cacheBuster, cacheBuster } = req.query; // ✅ ADD: Extract cache busting params
+
     if (!id || !/^[0-9a-fA-F]{24}$/.test(id)) {
       return next(new AppError("Invalid employee ID format", 400));
     }
@@ -370,6 +387,20 @@ const getEmployeeById = async (req, res, next) => {
     if (!employee) {
       return next(new AppError("Employee not found", 404));
     }
+
+      // ✅ ADD: Cache busting headers when needed
+    if (_cacheBuster || cacheBuster) {
+      res.set({
+        'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'ETag': false,
+        'Last-Modified': false
+      });
+      
+    }
+
+
     res.status(200).json(employee);
   } catch (error) {
     next(new AppError(error.message || "Failed to fetch employee", 500));
@@ -416,6 +447,31 @@ const addEmployee = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("At least one document is required");
   }
+
+  // ✅ Get location name for folder organization
+  let locationName = 'General'; // Default fallback
+  try {
+    const locationDoc = await Location.findById(location);
+    if (locationDoc) {
+      locationName = locationDoc.name;
+      
+    }
+  } catch (error) {
+      }
+
+
+// ✅ Upload files to location-specific folder
+  let googleDriveDocuments = [];
+  try {
+    
+    googleDriveDocuments = await googleDriveService.uploadMultipleFiles(files, employeeId, locationName);
+    
+  } catch (error) {
+    
+    res.status(500);
+    throw new Error(`Failed to upload documents to Google Drive: ${error.message}`);
+  }
+
 
   if (!mongoose.Types.ObjectId.isValid(location)) {
     res.status(400);
@@ -464,12 +520,31 @@ const addEmployee = asyncHandler(async (req, res) => {
     settings.paidLeavesPerYear
   );
 
-  const documents = files.map((file) => ({
-    name: file.originalname,
-    path: `/Uploads/${file.filename}`, // Use subfolder for documents
-    uploadedAt: new Date(),
-    size: file.size,
+  // const documents = files.map((file) => ({
+  //   name: file.originalname,
+  //   path: `/Uploads/${file.filename}`, // Use subfolder for documents
+  //   uploadedAt: new Date(),
+  //   size: file.size,
+  // }));
+
+ // ✅ Enhanced document metadata with location info
+  const documents = googleDriveDocuments.map(doc => ({
+    googleDriveId: doc.googleDriveId,
+    originalName: doc.originalName,
+    filename: doc.filename,
+    mimeType: doc.mimeType,
+    size: doc.size,
+    webViewLink: doc.webViewLink,
+    webContentLink: doc.webContentLink,
+    uploadedAt: doc.uploadedAt,
+    createdTime: doc.createdTime,
+    locationName: doc.locationName, // ✅ Store location info
+    locationFolderId: doc.locationFolderId,
+    // Backward compatibility
+    name: doc.originalName,
+    path: doc.googleDriveId,
   }));
+
 
   const employee = new Employee({
     employeeId,
@@ -525,6 +600,7 @@ const addEmployee = asyncHandler(async (req, res) => {
   }
 });
 
+
 // @desc    Update an employee
 // @route   PUT /api/admin/employees/:id
 // @access  Private/Admin
@@ -543,72 +619,62 @@ const editEmployee = asyncHandler(async (req, res) => {
     bankDetails,
   } = req.body;
 
-  "Editing employee with ID:", id;
-  "Request body:", req.body;
+  
+  
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
-    "Invalid employee ID:", id;
+    
     res.status(400);
     throw new Error("Invalid employee ID");
   }
 
   const employee = await Employee.findById(id);
   if (!employee) {
-    "Employee not found for ID:", id;
+    
     res.status(404);
     throw new Error("Employee not found");
   }
 
   if (!name || !email || !designation || !department || !salary) {
-    "Missing required fields:",
-      { name, email, designation, department, salary };
+    
     res.status(400);
-    throw new Error(
-      "Name, email, designation, department, and salary are required"
-    );
+    throw new Error("Name, email, designation, department, and salary are required");
   }
 
+  // ✅ ALL VALIDATION CODE (keep your existing validation)
   if (typeof name !== "string" || name.length < 3 || name.length > 50) {
-    "Validation failed for name:", name;
+    
     res.status(400);
     throw new Error("Name must be a string between 3 and 50 characters");
   }
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    "Validation failed for email format:", email;
+    
     res.status(400);
     throw new Error("Invalid email address");
   }
 
-  if (
-    typeof designation !== "string" ||
-    designation.length < 2 ||
-    designation.length > 50
-  ) {
-    "Validation failed for designation:", designation;
+  if (typeof designation !== "string" || designation.length < 2 || designation.length > 50) {
+    
     res.status(400);
     throw new Error("Designation must be a string between 2 and 50 characters");
   }
 
-  if (
-    typeof department !== "string" ||
-    department.length < 2 ||
-    department.length > 50
-  ) {
-    "Validation failed for department:", department;
+  if (typeof department !== "string" || department.length < 2 || department.length > 50) {
+    
     res.status(400);
     throw new Error("Department must be a string between 2 and 50 characters");
   }
 
   const parsedSalary = Number(salary);
   if (isNaN(parsedSalary) || parsedSalary < 1000) {
-    "Validation failed for salary:", salary;
+    
     res.status(400);
     throw new Error("Salary must be a number greater than or equal to 1000");
   }
 
   if (phone && !/^\d{10}$/.test(phone)) {
-    "Validation failed for phone:", phone;
+    
     res.status(400);
     throw new Error("Phone number must be 10 digits");
   }
@@ -616,13 +682,14 @@ const editEmployee = asyncHandler(async (req, res) => {
   if (dob) {
     const parsedDob = new Date(dob);
     if (isNaN(parsedDob.getTime())) {
-      "Validation failed for dob:", dob;
+      
       res.status(400);
+      throw new Error("Invalid date of birth");
     }
   }
 
   if (location && !mongoose.Types.ObjectId.isValid(location)) {
-    "Validation failed for location:", location;
+    
     res.status(400);
     throw new Error("Invalid location ID");
   }
@@ -635,10 +702,7 @@ const editEmployee = asyncHandler(async (req, res) => {
   }
 
   // Calculate max allowed available leaves based on proration
-  const proratedLeaves = calculateProratedLeaves(
-    employee.joinDate,
-    settings.paidLeavesPerYear
-  );
+  const proratedLeaves = calculateProratedLeaves(employee.joinDate, settings.paidLeavesPerYear);
 
   if (paidLeaves) {
     const { available, used, carriedForward } = paidLeaves;
@@ -653,53 +717,44 @@ const editEmployee = asyncHandler(async (req, res) => {
       typeof carriedForward !== "number" ||
       carriedForward < 0
     ) {
-      "Validation failed for paidLeaves:", paidLeaves;
+      
       res.status(400);
-      throw new Error(
-        "paidLeaves fields (available, used, carriedForward) must be non-negative numbers"
-      );
+      throw new Error("paidLeaves fields (available, used, carriedForward) must be non-negative numbers");
     }
     if (available > proratedLeaves) {
-      `Available leaves (${available}) exceeds prorated limit (${proratedLeaves})`;
+      
       res.status(400);
-      throw new Error(
-        `Available leaves cannot exceed prorated limit of ${proratedLeaves}`
-      );
+      throw new Error(`Available leaves cannot exceed prorated limit of ${proratedLeaves}`);
     }
   }
 
   if (bankDetails) {
     const { accountNo, ifscCode, bankName, accountHolder } = bankDetails;
     const hasAnyBankDetail = accountNo || ifscCode || bankName || accountHolder;
-    if (
-      hasAnyBankDetail &&
-      !(accountNo && ifscCode && bankName && accountHolder)
-    ) {
-      "Validation failed for bankDetails:", bankDetails;
+    if (hasAnyBankDetail && !(accountNo && ifscCode && bankName && accountHolder)) {
+      
       res.status(400);
-      throw new Error(
-        "All bank details fields are required if any bank detail is provided"
-      );
+      throw new Error("All bank details fields are required if any bank detail is provided");
     }
   }
 
   // Check for duplicate email
   if (email) {
-    "Checking for duplicate email:", email;
+    
     const existingEmployee = await Employee.findOne({
       email: email.toLowerCase(),
       _id: { $ne: id },
     });
     if (existingEmployee) {
-      "Duplicate email found:", email;
+      
       return res.status(400).json({ message: "Email already exists" });
     } else {
-      "No duplicate email found for:", email;
+      
     }
   }
 
   try {
-    // Update employee fields
+    // ✅ UPDATE EMPLOYEE FIELDS
     employee.name = name;
     employee.email = email.toLowerCase();
     employee.designation = designation;
@@ -710,38 +765,73 @@ const editEmployee = asyncHandler(async (req, res) => {
     if (location) {
       employee.location = location;
     }
-    if (paidLeaves) {
-      employee.paidLeaves = {
-        available: paidLeaves.available,
-        used: paidLeaves.used,
-        carriedForward: paidLeaves.carriedForward,
-      };
-    }
+
+    // ✅ Handle bank details using safe nested updates
     if (bankDetails) {
-      employee.bankDetails = {
-        accountNo: bankDetails.accountNo,
-        ifscCode: bankDetails.ifscCode,
-        bankName: bankDetails.bankName,
-        accountHolder: bankDetails.accountHolder,
-      };
+      employee.set('bankDetails.accountNo', bankDetails.accountNo);
+      employee.set('bankDetails.ifscCode', bankDetails.ifscCode);
+      employee.set('bankDetails.bankName', bankDetails.bankName);
+      employee.set('bankDetails.accountHolder', bankDetails.accountHolder);
     }
 
-    ("Saving employee...");
-    await employee.save();
-    ("Employee saved successfully");
+    // ✅ Handle manual paidLeaves update using safe nested updates
+    if (paidLeaves) {
+      
+      
+      
 
+      employee.isManualPaidLeavesUpdate = true;
+      
+      // ✅ USE SAFE NESTED UPDATES instead of object replacement
+      employee.set('paidLeaves.available', paidLeaves.available);
+      employee.set('paidLeaves.used', paidLeaves.used);
+      employee.set('paidLeaves.carriedForward', paidLeaves.carriedForward);
+      
+      // ✅ Distribute across remaining months only
+      await redistributeMonthlyLeaves(employee, paidLeaves);
+      
+      employee.markModified('paidLeaves');
+      employee.markModified('monthlyLeaves');
+      
+      
+    }
+
+    // ✅ SINGLE SAVE OPERATION
+    
+    await employee.save();
+    
+
+    // ✅ DO NOT RESET THE FLAG - Keep it true to preserve manual values
+    if (paidLeaves) {
+      
+      // Keep isManualPaidLeavesUpdate = true permanently to prevent future auto-calculations
+    }
+
+    // ✅ Populate and return response
     let updatedEmployee;
     try {
       updatedEmployee = await Employee.findById(id)
         .populate("location")
         .populate("createdBy");
     } catch (populateError) {
-      "Error during populate:", populateError;
+      
       updatedEmployee = await Employee.findById(id);
     }
+    
+    // ✅ ADD: Force cache invalidation after employee update
+res.set({
+  'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+  'Pragma': 'no-cache',
+  'Expires': '0',
+  'ETag': false,
+  'Last-Modified': false
+});
+
+
     res.status(200).json(updatedEmployee);
+    
   } catch (error) {
-    "Error during employee update:", error;
+    
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((err) => ({
         field: err.path,
@@ -750,19 +840,257 @@ const editEmployee = asyncHandler(async (req, res) => {
       res.status(400).json({ message: "Validation failed", errors });
     } else if (error.code === 11000) {
       const field = Object.keys(error.keyValue)[0];
-      res
-        .status(400)
-        .json({
-          message: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists`,
-        });
+      res.status(400).json({
+        message: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists`,
+      });
     } else {
-      "Unhandled error during employee update:", error;
-      res
-        .status(500)
-        .json({ message: "Failed to update employee", error: error.message });
+      
+      res.status(500).json({ message: "Failed to update employee", error: error.message });
     }
   }
 });
+
+
+
+
+// ✅ NEW: Function to redistribute manual updates across monthly leaves
+// ✅ ENHANCED: Function to redistribute manual updates across monthly leaves
+const redistributeMonthlyLeaves = async (employee, paidLeaves) => {
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  const currentMonth = currentDate.getMonth() + 1; // 1-based month
+  
+  
+  
+  
+  // ✅ Calculate remaining months including current month
+  const monthsRemainingInYear = 12 - currentMonth + 1;
+  const perMonthAllocation = paidLeaves.available / monthsRemainingInYear;
+  
+  // ✅ FORCE CHANGE DETECTION: Clone and replace monthlyLeaves array
+  const updatedMonthlyLeaves = [...employee.monthlyLeaves];
+  
+  // ✅ Update only current and future months in the current year
+  for (let i = 0; i < updatedMonthlyLeaves.length; i++) {
+    const ml = updatedMonthlyLeaves[i];
+    
+    if (ml.year === currentYear && ml.month >= currentMonth) {
+      const previousTaken = ml.taken || 0;
+      
+      // ✅ Create new object to trigger change detection
+      updatedMonthlyLeaves[i] = {
+        ...ml,
+        allocated: Math.round(perMonthAllocation * 10) / 10,
+        taken: previousTaken,
+        carriedForward: ml.carriedForward || 0,
+        available: Math.max(0, Math.round(perMonthAllocation * 10) / 10 - previousTaken)
+      };
+      
+      
+    }
+  }
+  
+  // ✅ FORCE MONGOOSE TO DETECT CHANGES
+  employee.monthlyLeaves = updatedMonthlyLeaves;
+  employee.markModified('monthlyLeaves');
+  
+  
+};
+
+// ✅ ADD: Helper function to check attendance in month
+const hasAttendanceInMonth = async (employeeId, year, month) => {
+  try {
+    const startStr = `${year}-${month.toString().padStart(2, '0')}-01T00:00:00+05:30`;
+    const endDate = new Date(year, month, 0);
+    const endStr = `${year}-${month.toString().padStart(2, '0')}-${endDate.getDate()}T23:59:59+05:30`;
+    
+    const count = await mongoose.model('Attendance').countDocuments({
+      employee: employeeId,
+      date: { $gte: startStr, $lte: endStr },
+      status: { $in: ['present', 'leave', 'half-day'] },
+      isDeleted: false,
+    });
+    
+    return count > 0;
+  } catch (error) {
+    
+    return false;
+  }
+};
+
+
+// ✅ NEW: Salary calculation endpoints
+// GET /api/superadmin/employees/:id/salary/:year/:month
+export const getEmployeeMonthlySalary = async (req, res) => {
+  try {
+    const { id, year, month } = req.params;
+    
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid employee ID' });
+    }
+    
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+    
+    // Find monthly presence record
+    const monthlyPresence = employee.monthlyPresence.find(
+      mp => mp.year === parseInt(year) && mp.month === parseInt(month)
+    ) || { totalPresenceDays: 0, workingDaysInMonth: 30 };
+    
+    // ✅ Calculate salary based on presence days only
+    const monthlySalary = employee.salary || 0;
+    const workingDaysForCalculation = monthlyPresence.workingDaysInMonth || 30;
+    const dailySalary = monthlySalary / workingDaysForCalculation;
+    const payableSalary = dailySalary * monthlyPresence.totalPresenceDays;
+    
+    // Get leave information for reference
+    const monthlyLeave = employee.monthlyLeaves.find(
+      ml => ml.year === parseInt(year) && ml.month === parseInt(month)
+    ) || { allocated: 2, taken: 0, available: 2, carriedForward: 0 };
+    
+    // ✅ Calculate attendance summary
+    const startDate = `${year}-${month.toString().padStart(2, '0')}-01T00:00:00+05:30`;
+    const endDate = `${year}-${month.toString().padStart(2, '0')}-31T23:59:59+05:30`;
+    
+    const attendanceRecords = await Attendance.find({
+      employee: id,
+      date: { $gte: startDate, $lte: endDate },
+      isDeleted: false
+    }).lean();
+
+    const attendanceSummary = {
+      totalDays: attendanceRecords.length,
+      presentDays: attendanceRecords.filter(a => a.status === 'present').length,
+      halfDays: attendanceRecords.filter(a => a.status === 'half-day').length,
+      leaveDays: attendanceRecords.filter(a => a.status === 'leave').length,
+      absentDays: attendanceRecords.filter(a => a.status === 'absent').length,
+    };
+    
+    res.status(200).json({
+      employee: {
+        _id: employee._id,
+        name: employee.name,
+        employeeId: employee.employeeId,
+        salary: monthlySalary
+      },
+      salaryCalculation: {
+        baseMonthlySalary: monthlySalary,
+        workingDaysForCalculation: workingDaysForCalculation,
+        dailySalary: dailySalary,
+        totalPresenceDays: monthlyPresence.totalPresenceDays,
+        payableSalary: payableSalary,
+        salaryEfficiency: ((monthlyPresence.totalPresenceDays / workingDaysForCalculation) * 100).toFixed(1) + '%'
+      },
+      attendanceSummary: attendanceSummary,
+      leaveInformation: {
+        allocated: monthlyLeave.allocated,
+        taken: monthlyLeave.taken,
+        available: monthlyLeave.available,
+        carriedForward: monthlyLeave.carriedForward,
+        withinLimit: monthlyLeave.taken <= (monthlyLeave.allocated + monthlyLeave.carriedForward)
+      },
+      month: parseInt(month),
+      year: parseInt(year)
+    });
+    
+  } catch (error) {
+    
+    res.status(500).json({ message: 'Server error calculating salary' });
+  }
+};
+
+// ✅ NEW: Bulk salary calculation for payroll
+// GET /api/superadmin/payroll/:year/:month?location=locationId
+export const getPayrollSummary = async (req, res) => {
+  try {
+    const { year, month } = req.params;
+    const { location } = req.query;
+    
+    // Build query for employees
+    const employeeQuery = { 
+      status: 'active', 
+      isDeleted: false 
+    };
+    
+    if (location && location !== 'all') {
+      if (!mongoose.Types.ObjectId.isValid(location)) {
+        return res.status(400).json({ message: 'Invalid location ID' });
+      }
+      employeeQuery.location = new mongoose.Types.ObjectId(location);
+    }
+    
+    const employees = await Employee.find(employeeQuery)
+      .populate('location', 'name')
+      .lean();
+    
+    const payrollData = [];
+    let totalPayableSalary = 0;
+    
+    for (const employee of employees) {
+      // Find monthly presence
+      const monthlyPresence = employee.monthlyPresence.find(
+        mp => mp.year === parseInt(year) && mp.month === parseInt(month)
+      ) || { totalPresenceDays: 0, workingDaysInMonth: 30 };
+      
+      // Calculate salary
+      const monthlySalary = employee.salary || 0;
+      const dailySalary = monthlySalary / (monthlyPresence.workingDaysInMonth || 30);
+      const payableSalary = dailySalary * monthlyPresence.totalPresenceDays;
+      
+      // Get leave info
+      const monthlyLeave = employee.monthlyLeaves.find(
+        ml => ml.year === parseInt(year) && ml.month === parseInt(month)
+      ) || { allocated: 2, taken: 0, available: 2, carriedForward: 0 };
+      
+      payrollData.push({
+        employee: {
+          _id: employee._id,
+          employeeId: employee.employeeId,
+          name: employee.name,
+          department: employee.department,
+          designation: employee.designation,
+          location: employee.location?.name || 'N/A'
+        },
+        salary: {
+          baseMonthlySalary: monthlySalary,
+          dailySalary: dailySalary,
+          presenceDays: monthlyPresence.totalPresenceDays,
+          payableSalary: payableSalary,
+          efficiency: ((monthlyPresence.totalPresenceDays / 30) * 100).toFixed(1) + '%'
+        },
+        leaves: {
+          allocated: monthlyLeave.allocated,
+          taken: monthlyLeave.taken,
+          available: monthlyLeave.available,
+          withinLimit: monthlyLeave.taken <= (monthlyLeave.allocated + monthlyLeave.carriedForward)
+        }
+      });
+      
+      totalPayableSalary += payableSalary;
+    }
+    
+    res.status(200).json({
+      payroll: payrollData,
+      summary: {
+        totalEmployees: employees.length,
+        totalPayableSalary: totalPayableSalary,
+        averageSalary: employees.length > 0 ? (totalPayableSalary / employees.length) : 0,
+        month: parseInt(month),
+        year: parseInt(year),
+        location: location || 'all'
+      }
+    });
+    
+  } catch (error) {
+    
+    res.status(500).json({ message: 'Server error generating payroll' });
+  }
+};
+
+
+
 
 // @desc    Deactivate an employee
 // @route   PUT /api/admin/employees/:id/deactivate
@@ -1036,17 +1364,48 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
     throw new Error("Invalid employee ID");
   }
 
-  const employee = await Employee.findById(id);
+   // ✅ FETCH EMPLOYEE WITH POPULATED LOCATION
+  const employee = await Employee.findById(id).populate('location');
   if (!employee) {
     res.status(404);
     throw new Error("Employee not found");
   }
 
-  const newDocuments = files.map((file) => ({
-    name: file.originalname,
-    path: `/Uploads/${file.filename}`,
-    uploadedAt: new Date(),
-    size: file.size,
+   // ✅ Get location name
+  const locationName = employee.location?.name || 'General';
+  
+
+  // ✅ Upload to location-specific folder
+  let googleDriveDocuments = [];
+  try {
+    googleDriveDocuments = await googleDriveService.uploadMultipleFiles(files, employee.employeeId, locationName);
+  } catch (error) {
+    
+    res.status(500);
+    throw new Error(`Failed to upload documents to Google Drive: ${error.message}`);
+  }
+
+
+  // const newDocuments = files.map((file) => ({
+  //   name: file.originalname,
+  //   path: `/Uploads/${file.filename}`,
+  //   uploadedAt: new Date(),
+  //   size: file.size,
+  // }));
+
+    // Convert to document schema format
+  const newDocuments = googleDriveDocuments.map(doc => ({
+    googleDriveId: doc.googleDriveId,
+    originalName: doc.originalName,
+    filename: doc.filename,
+    mimeType: doc.mimeType,
+    size: doc.size,
+    webViewLink: doc.webViewLink,
+    webContentLink: doc.webContentLink,
+    uploadedAt: doc.uploadedAt,
+    createdTime: doc.createdTime,
+    name: doc.originalName,
+    path: doc.googleDriveId,
   }));
 
   employee.documents.push(...newDocuments);
@@ -1127,6 +1486,16 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
       },
     });
   } catch (error) {
+      // Clean up uploaded files on save error
+        for (const doc of googleDriveDocuments) {
+          try {
+            await googleDriveService.deleteFile(doc.googleDriveId);
+          } catch (deleteError) {
+            
+          }
+        }
+        throw error;
+
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((err) => ({
         field: err.path,
@@ -1891,5 +2260,6 @@ export {
   getDepartments,
   deleteEmployee,
   restoreEmployee,
-  getEmployeeDocuments
+  getEmployeeDocuments,
+  redistributeMonthlyLeaves
 };
