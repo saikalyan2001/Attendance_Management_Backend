@@ -12,6 +12,27 @@ import AppError from "../../utils/AppError.js";
 import Attendance from "../../models/Attendance.js";
 import googleDriveService from '../../utils/googleDriveService.js';
 
+
+// Helper function to sanitize employee data with defaults
+const sanitizeEmployeeData = (emp, row) => {
+  return {
+    employeeId: emp.employeeId || `UNKNOWN-${row}`,
+    name: emp.name || 'Name Not Provided',
+    email: emp.email || '',
+    designation: emp.designation || 'Not Specified',
+    department: emp.department || 'General',
+    salary: emp.salary || '0',
+    locationName: emp.locationName || '',
+    phone: emp.phone || '',
+    joinDate: emp.joinDate || new Date().toISOString().split('T')[0],
+    accountNo: emp.accountNo || '',
+    ifscCode: emp.ifscCode || '',
+    bankName: emp.bankName || '',
+    accountHolder: emp.accountHolder || ''
+  };
+};
+
+
 // Helper function to parse salary with commas
 const parseSalary = (salary) => {
   if (!salary) return NaN;
@@ -1376,127 +1397,134 @@ const addEmployeesFromExcel = async (req, res, next) => {
       // ✅ No email duplicates check
     });
 
-    console.log('⚙️ Processing employees for validation...');
-    for (let i = 0; i < employees.length; i++) {
-      const emp = employees[i];
-      const row = i + 2;
-      
-      try {
-        console.log(`🔍 Processing row ${row}:`, emp.employeeId, 'Salary:', emp.salary);
+   console.log('⚙️ Processing employees for validation...');
+for (let i = 0; i < employees.length; i++) {
+  const emp = employees[i];
+  const row = i + 2;
+  
+  try {
+    console.log(`🔍 Processing row ${row}:`, emp.employeeId, 'Salary:', emp.salary);
 
-        // Basic field presence check (no strict validation)
-        if (!emp.employeeId || !emp.name || !emp.email || !emp.designation || 
-            !emp.department || !emp.salary || !emp.locationName || !emp.phone || 
-            !emp.joinDate || !emp.accountNo || !emp.ifscCode || !emp.bankName || 
-            !emp.accountHolder) {
-          console.log(`❌ Row ${row}: Missing required fields`);
-          errors.push({ row, message: "Missing required fields" });
-          continue;
-        }
+    // ✅ UPDATED: Sanitize data with defaults instead of rejecting
+    const sanitizedEmp = {
+      employeeId: emp.employeeId || `UNKNOWN-${row}`,
+      name: emp.name || 'Name Not Provided',
+      email: emp.email || '',
+      designation: emp.designation || 'Not Specified', 
+      department: emp.department || 'General',
+      salary: emp.salary || '0',
+      locationName: emp.locationName || '',
+      phone: emp.phone || '',
+      joinDate: emp.joinDate || new Date().toISOString().split('T')[0],
+      accountNo: emp.accountNo || '',
+      ifscCode: emp.ifscCode || '',
+      bankName: emp.bankName || '',
+      accountHolder: emp.accountHolder || ''
+    };
 
-        // ✅ Check duplicates (excluding email)
-        if (existingEmployeeIds.has(emp.employeeId)) {
-          console.log(`❌ Row ${row}: Duplicate Employee ID`);
-          errors.push({ row, message: `Employee ID already exists: ${emp.employeeId}` });
-          continue;
-        }
-        if (existingPhones.has(emp.phone)) {
-          console.log(`❌ Row ${row}: Duplicate Phone`);
-          errors.push({ row, message: `Phone already exists: ${emp.phone}` });
-          continue;
-        }
-        // ✅ No email duplicate check - duplicates allowed
-
-        // Parse salary with commas
-        const parsedSalary = parseSalary(emp.salary);
-        console.log(`💰 Row ${row}: Salary "${emp.salary}" -> ${parsedSalary}`);
-        
-        if (isNaN(parsedSalary) || parsedSalary <= 0) {
-          console.log(`❌ Row ${row}: Invalid salary - ${emp.salary} -> ${parsedSalary}`);
-          errors.push({ row, message: `Invalid salary: ${emp.salary}` });
-          continue;
-        }
-
-        // Validate locationName
-        const locationId = locationMap[emp.locationName.toLowerCase()];
-        if (!locationId) {
-          console.log(`❌ Row ${row}: Location not found: ${emp.locationName}`);
-          errors.push({ row, message: `Location not found: ${emp.locationName}` });
-          continue;
-        }
-
-        // Parse joinDate
-        let parsedJoinDate;
-        if (typeof emp.joinDate === "number") {
-          parsedJoinDate = XLSX.SSF.parse_date_code(emp.joinDate);
-          parsedJoinDate = new Date(parsedJoinDate.y, parsedJoinDate.m - 1, parsedJoinDate.d);
-        } else {
-          parsedJoinDate = new Date(emp.joinDate);
-        }
-
-        if (isNaN(parsedJoinDate)) {
-          console.log(`❌ Row ${row}: Invalid join date`);
-          errors.push({ row, message: "Invalid join date" });
-          continue;
-        }
-
-        // Calculate prorated leaves
-        const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {
-          const join = new Date(joinDate);
-          const joinYear = join.getFullYear();
-          const joinMonth = join.getMonth(); 
-          const currentYear = new Date().getFullYear();
-
-          if (joinYear === currentYear) {
-            const remainingMonths = 12 - joinMonth;
-            return Math.round((paidLeavesPerYear * remainingMonths) / 12);
-          }
-          return paidLeavesPerYear;
-        };
-
-        const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
-        const documents = documentMap[emp.employeeId] || [];
-
-        const validEmployee = {
-          employeeId: emp.employeeId,
-          name: emp.name,
-          email: emp.email.toLowerCase(), // ✅ No uniqueness constraint
-          designation: emp.designation,
-          department: emp.department,
-          salary: parsedSalary,
-          location: locationId,
-          phone: emp.phone,
-          joinDate: parsedJoinDate,
-          bankDetails: {
-            accountNo: emp.accountNo,
-            ifscCode: emp.ifscCode,
-            bankName: emp.bankName,
-            accountHolder: emp.accountHolder,
-          },
-          paidLeaves: {
-            available: proratedLeaves,
-            used: 0,
-            carriedForward: 0,
-          },
-          documents,
-          createdBy: req.user._id,
-          status: "active",
-          employmentHistory: [
-            {
-              startDate: parsedJoinDate,
-              status: "active",
-            },
-          ],
-        };
-
-        validEmployees.push(validEmployee);
-        console.log(`✅ Row ${row}: Valid employee processed - Salary: ${parsedSalary}`);
-
-      } catch (err) {
-        console.log(`❌ Row ${row}: Processing error:`, err.message);
-        errors.push({ row, message: err.message });
-      }
+    // ✅ Only reject if critical fields are completely unusable
+    if (!sanitizedEmp.employeeId || sanitizedEmp.employeeId.startsWith('UNKNOWN-')) {
+      // If no employeeId provided, generate one
+      sanitizedEmp.employeeId = `AUTO-${Date.now()}-${row}`;
     }
+
+    // ✅ Check duplicates (excluding email)
+    if (existingEmployeeIds.has(sanitizedEmp.employeeId)) {
+      console.log(`❌ Row ${row}: Duplicate Employee ID`);
+      errors.push({ row, message: `Employee ID already exists: ${sanitizedEmp.employeeId}` });
+      continue;
+    }
+    if (sanitizedEmp.phone && existingPhones.has(sanitizedEmp.phone)) {
+      console.log(`❌ Row ${row}: Duplicate Phone`);
+      errors.push({ row, message: `Phone already exists: ${sanitizedEmp.phone}` });
+      continue;
+    }
+
+    // Parse salary with commas
+    const parsedSalary = parseSalary(sanitizedEmp.salary);
+    console.log(`💰 Row ${row}: Salary "${sanitizedEmp.salary}" -> ${parsedSalary}`);
+    
+    if (isNaN(parsedSalary)) {
+      console.log(`⚠️ Row ${row}: Invalid salary, defaulting to 0`);
+      sanitizedEmp.salary = 0;
+    } else {
+      sanitizedEmp.salary = parsedSalary;
+    }
+
+    // Validate locationName - use default if not found
+    let locationId = locationMap[sanitizedEmp.locationName.toLowerCase()];
+    if (!locationId && sanitizedEmp.locationName) {
+      console.log(`⚠️ Row ${row}: Location not found: ${sanitizedEmp.locationName}, using default`);
+      // Use first available location as default or create a default ObjectId
+      locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
+    } else if (!locationId) {
+      // No location provided, use first available location
+      locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
+    }
+
+    // Parse joinDate with fallback
+    let parsedJoinDate;
+    if (sanitizedEmp.joinDate) {
+      if (typeof sanitizedEmp.joinDate === "number") {
+        parsedJoinDate = XLSX.SSF.parse_date_code(sanitizedEmp.joinDate);
+        parsedJoinDate = new Date(parsedJoinDate.y, parsedJoinDate.m - 1, parsedJoinDate.d);
+      } else {
+        parsedJoinDate = new Date(sanitizedEmp.joinDate);
+      }
+    } else {
+      parsedJoinDate = new Date(); // Default to current date
+    }
+
+    if (isNaN(parsedJoinDate)) {
+      console.log(`⚠️ Row ${row}: Invalid join date, using current date`);
+      parsedJoinDate = new Date();
+    }
+
+    // Calculate prorated leaves
+    const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
+    const documents = documentMap[sanitizedEmp.employeeId] || [];
+
+    const validEmployee = {
+      employeeId: sanitizedEmp.employeeId,
+      name: sanitizedEmp.name,
+      email: sanitizedEmp.email.toLowerCase(),
+      designation: sanitizedEmp.designation,
+      department: sanitizedEmp.department,
+      salary: sanitizedEmp.salary,
+      location: locationId,
+      phone: sanitizedEmp.phone,
+      joinDate: parsedJoinDate,
+      bankDetails: {
+        accountNo: sanitizedEmp.accountNo,
+        ifscCode: sanitizedEmp.ifscCode,
+        bankName: sanitizedEmp.bankName,
+        accountHolder: sanitizedEmp.accountHolder,
+      },
+      paidLeaves: {
+        available: proratedLeaves,
+        used: 0,
+        carriedForward: 0,
+      },
+      documents,
+      createdBy: req.user._id,
+      status: "active",
+      employmentHistory: [
+        {
+          startDate: parsedJoinDate,
+          status: "active",
+        },
+      ],
+    };
+
+    validEmployees.push(validEmployee);
+    console.log(`✅ Row ${row}: Employee processed (with defaults if needed) - Salary: ${sanitizedEmp.salary}`);
+
+  } catch (err) {
+    console.log(`❌ Row ${row}: Processing error:`, err.message);
+    errors.push({ row, message: err.message });
+  }
+}
+
 
     console.log('📊 Processing summary:', {
       totalRows: employees.length,
@@ -1521,70 +1549,97 @@ const addEmployeesFromExcel = async (req, res, next) => {
     console.log('💾 Attempting to insert', validEmployees.length, 'employees into database...');
 
     try {
-      const insertResult = await Employee.insertMany(validEmployees, { 
-        ordered: false, // Continue on errors
-        rawResult: true 
+  const insertResult = await Employee.insertMany(validEmployees, { 
+    ordered: false,
+    rawResult: true 
+  });
+
+// After successful insertion
+const insertedCount = insertResult.insertedCount || insertResult.length;
+const insertedEmployees = insertResult.ops || insertResult.mongoose?.results || insertResult;
+
+// ✅ Verify actual database count
+const totalEmployeesInDB = await Employee.countDocuments({});
+console.log('📊 Database verification:', {
+  insertedThisSession: insertedCount,
+  totalInDatabase: totalEmployeesInDB
+});
+
+res.status(201).json({
+  message: `Successfully processed ${insertedCount} employees${errors.length > 0 ? ` with ${errors.length} errors` : ''}`,
+  count: insertedCount,
+  employees: insertedEmployees,
+  databaseTotal: totalEmployeesInDB, // ✅ Include total count
+  summary: {
+    totalProcessed: employees.length,
+    successfullyInserted: insertedCount,
+    validationErrors: errors.length,
+    duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length
+  },
+  errors: errors.length > 0 ? errors : undefined
+});
+
+
+}  catch (insertError) {
+  console.log('❌ Database insertion had errors:', {
+    name: insertError.name,
+    code: insertError.code,
+    message: insertError.message,
+    writeErrors: insertError.writeErrors?.length || 0
+  });
+  
+  // Handle BulkWriteError case  
+  if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
+    const insertedCount = insertError.result?.insertedCount || 0;
+    const writeErrors = insertError.writeErrors || [];
+    
+    // ✅ ENHANCED: Log detailed error information
+    console.log('📊 Detailed BulkWriteError analysis:');
+    writeErrors.forEach((err, index) => {
+      console.log(`Error ${index + 1}:`, {
+        index: err.index,
+        code: err.code,
+        errmsg: err.errmsg,
+        keyPattern: err.err?.keyPattern,
+        keyValue: err.err?.keyValue,
+        operationType: err.err?.op
       });
+    });
 
-      console.log('✅ Database insertion completed!');
-      console.log('📊 Insert result:', {
-        insertedCount: insertResult.insertedCount || insertResult.length,
-        hasErrors: insertResult.writeErrors && insertResult.writeErrors.length > 0
-      });
+    const insertedEmployees = insertError.insertedDocs || [];
 
-      const insertedCount = insertResult.insertedCount || insertResult.length;
-      const insertedEmployees = insertResult.ops || insertResult;
-      
-      res.status(201).json({
-        message: `Successfully processed ${insertedCount} employees${errors.length > 0 ? ` with ${errors.length} errors` : ''}`,
-        count: insertedCount,
-        employees: insertedEmployees,
-        summary: {
-          totalProcessed: employees.length,
-          successfullyInserted: insertedCount,
-          validationErrors: errors.length,
-          duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length
-        },
-        errors: errors.length > 0 ? errors : undefined
-      });
+    return res.status(201).json({
+      message: `Partially successful: ${insertedCount} employees inserted, ${writeErrors.length} failed`,
+      count: insertedCount,
+      employees: insertedEmployees,
+      summary: {
+        totalProcessed: employees.length,
+        successfullyInserted: insertedCount,
+        validationErrors: errors.length,
+        duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length,
+        insertionErrors: writeErrors.length
+      },
+      errors: errors.length > 0 ? errors : undefined,
+      insertionErrors: writeErrors.map((err) => ({
+        index: err.index,
+        code: err.code,
+        // ✅ IMPROVED: Extract actual error messages
+        error: err.errmsg || 
+               err.err?.errmsg || 
+               (err.err?.code === 11000 ? `Duplicate key: ${JSON.stringify(err.err.keyValue)}` : '') ||
+               err.message || 
+               'Unknown insertion error',
+        details: {
+          keyPattern: err.err?.keyPattern,
+          keyValue: err.err?.keyValue
+        }
+      }))
+    });
+  }
+  throw insertError;
+}
 
-    } catch (insertError) {
-      console.log('❌ Database insertion had errors:', insertError);
-      
-      // Handle BulkWriteError - extract successful insertions
-      if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
-        const insertedCount = insertError.result?.insertedCount || insertError.insertedDocs?.length || 0;
-        const writeErrors = insertError.writeErrors || [];
-        
-        console.log('📊 BulkWriteError summary:', {
-          insertedCount,
-          writeErrorsCount: writeErrors.length,
-          totalAttempted: validEmployees.length
-        });
 
-        const insertedEmployees = insertError.insertedDocs || [];
-
-        return res.status(201).json({
-          message: `Partially successful: ${insertedCount} employees inserted, ${writeErrors.length} failed`,
-          count: insertedCount,
-          employees: insertedEmployees,
-          summary: {
-            totalProcessed: employees.length,
-            successfullyInserted: insertedCount,
-            validationErrors: errors.length,
-            duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length,
-            insertionErrors: writeErrors.length
-          },
-          errors: errors.length > 0 ? errors : undefined,
-          insertionErrors: writeErrors.map((err, index) => ({
-            index: err.index,
-            error: err.errmsg || err.err?.message || 'Unknown insertion error'
-          }))
-        });
-      }
-
-      throw insertError;
-    }
 
   } catch (error) {
     console.log('❌ Overall function error:', error);
