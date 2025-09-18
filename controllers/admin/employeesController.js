@@ -596,16 +596,9 @@ const redistributeMonthlyLeaves = async (employee, paidLeaves) => {
 
     
   // ✅ DEBUG: Add logging
-
-
-
-  
   // Calculate remaining months including current month
   const monthsRemainingInYear = 12 - currentMonth + 1;
   const perMonthAllocation = paidLeaves.available / monthsRemainingInYear;
-
-
-  
   // Force change detection: Clone and replace monthlyLeaves array
   const updatedMonthlyLeaves = [...employee.monthlyLeaves];
 
@@ -626,7 +619,6 @@ const redistributeMonthlyLeaves = async (employee, paidLeaves) => {
         carriedForward: ml.carriedForward || 0,
         available: Math.max(0, roundedAllocation - previousTaken)
       };
-
     }
   }
   
@@ -1256,38 +1248,29 @@ const getEmployeeAdvances = asyncHandler(async (req, res) => {
 // ✅ ENHANCED: Excel date parsing helper function - add this before addEmployeesFromExcel
 const parseExcelDate = (dateValue) => {
   if (!dateValue) return null;
-
-
-
   // If it's already a Date object from cellDates: true
   if (dateValue instanceof Date && !isNaN(dateValue.getTime())) {
-
     return dateValue;
   }
 
   // If it's a number (Excel serial date)
   if (typeof dateValue === 'number') {
-
     try {
       // Use XLSX built-in date conversion
       const parsedDate = XLSX.SSF.parse_date_code(dateValue);
       if (parsedDate && parsedDate.y && parsedDate.m && parsedDate.d) {
         const jsDate = new Date(parsedDate.y, parsedDate.m - 1, parsedDate.d);
         if (!isNaN(jsDate.getTime())) {
-
           return jsDate;
         }
       }
     } catch (error) {
-
     }
   }
 
   // If it's a string, try various formats
   if (typeof dateValue === 'string') {
     const cleanDateStr = dateValue.trim();
-
-    
     // Try different date formats
     const dateFormats = [
       // DD.MM.YYYY format (common in European Excel)
@@ -1314,7 +1297,6 @@ const parseExcelDate = (dateValue) => {
         const parsedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
         
         if (!isNaN(parsedDate.getTime())) {
-
           return parsedDate;
         }
       }
@@ -1323,12 +1305,9 @@ const parseExcelDate = (dateValue) => {
     // Try native Date parsing as fallback
     const nativeDate = new Date(cleanDateStr);
     if (!isNaN(nativeDate.getTime())) {
-
       return nativeDate;
     }
   }
-
-
   return null;
 };
 
@@ -1336,8 +1315,6 @@ const parseExcelDate = (dateValue) => {
 // In controllers/admin/employeeController.js - Fix the initialization
 const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
   if (!employee.monthlyLeaves || employee.monthlyLeaves.length === 0) {
-
-    
     const joinDate = new Date(employee.joinDate);
     const joinYear = joinDate.getFullYear();
     const joinMonth = joinDate.getMonth() + 1;
@@ -1380,8 +1357,6 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
         employee.monthlyLeaves.push(monthlyLeave);
       }
     }
-    
-
     return true;
   }
   return false;
@@ -1391,18 +1366,14 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
 // ✅ COMPLETE UPDATED: Add employees from Excel file with prorated leave fix
 const addEmployeesFromExcel = async (req, res, next) => {
   try {
-
-
-
-
     if (!req.files || !req.files.excelFile || req.files.excelFile.length === 0) {
-
       return next(new AppError("No Excel file uploaded", 400));
     }
 
-    const excelFile = req.files.excelFile[0];    const documentFiles = req.files.documents || [];
+    const excelFile = req.files.excelFile[0];
+  
 
-
+    const documentFiles = req.files.documents || [];
     const requiredHeaders = [
       "employeeId", "name", "email", "designation", "department", 
       "salary", "locationName", "phone", "joinDate", "accountNo", 
@@ -1411,10 +1382,7 @@ const addEmployeesFromExcel = async (req, res, next) => {
 
     let employees = [];
     const fileExtension = excelFile.originalname.split(".").pop().toLowerCase();
-
-
     if (fileExtension === "csv") {
-
       const fileContent = await fs.readFile(excelFile.path, 'utf8');
       const records = parse(fileContent, {
         columns: true,
@@ -1424,7 +1392,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
       });
       employees = records;
     } else if (["xlsx", "xls"].includes(fileExtension)) {
-
       const fileBuffer = await fs.readFile(excelFile.path);
       
       const workbook = XLSX.read(fileBuffer, { 
@@ -1436,10 +1403,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
       
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
-      
-
-
-      
       employees = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         blankrows: false,
@@ -1448,13 +1411,10 @@ const addEmployeesFromExcel = async (req, res, next) => {
       });
 
       if (employees.length < 1) {
-
         return next(new AppError("Excel file is empty", 400));
       }
 
       const headers = employees[0].map((h) => h ? h.toString().trim() : '');
-
-      
       employees = employees
         .slice(1)
         .map((row) => {
@@ -1468,21 +1428,14 @@ const addEmployeesFromExcel = async (req, res, next) => {
           return Object.values(emp).some((val) => val !== null && val !== "");
         });
     } else {
-
       return next(new AppError("Unsupported file format", 400));
     }
-
-
     if (employees.length > 0) {
-
     }
 
     const fileHeaders = employees.length > 0 ? Object.keys(employees[0]) : [];
-
-
     const missingHeaders = requiredHeaders.filter((h) => !fileHeaders.includes(h));
     if (missingHeaders.length > 0) {
-
       return next(new AppError(`Missing required headers: ${missingHeaders.join(", ")}`, 400));
     }
 
@@ -1505,23 +1458,20 @@ const addEmployeesFromExcel = async (req, res, next) => {
       }
     });
 
-    // Fetch all locations
-    const locations = await Location.find().select("name _id");
-    const locationMap = {};
-    locations.forEach((loc) => {
-      locationMap[loc.name.toLowerCase()] = loc._id;
-    });
-
-
+  // ✅ IMPROVED: Better locationMap creation with debugging
+const locations = await Location.find().select("name _id");
+const locationMap = {};
+locations.forEach((loc) => {
+  const cleanName = loc.name.toString().toLowerCase().trim();
+  locationMap[cleanName] = loc._id;
+});
     // Fetch settings with populated location data
     const settings = await Settings.findOne().populate('locationLeaveSettings.location');
     if (!settings) {
-
       return next(new AppError("Settings not found", 500));
     }
 
     // Check for duplicates (excluding email - duplicates allowed)
-
     const employeeIds = employees.map(emp => emp.employeeId).filter(Boolean);
     const phones = employees.map(emp => emp.phone).filter(Boolean);
 
@@ -1533,13 +1483,14 @@ const addEmployeesFromExcel = async (req, res, next) => {
     }).select('employeeId phone').lean();
 
     const existingEmployeeIds = new Set(existingEmployees.map(e => e.employeeId));
-    const existingPhones = new Set(existingEmployees.map(e => e.phone));    for (let i = 0; i < employees.length; i++) {
+    const existingPhones = new Set(existingEmployees.map(e => e.phone));
+
+ 
+    for (let i = 0; i < employees.length; i++) {
       const emp = employees[i];
       const row = i + 2;
       
       try {
-
-
         // Sanitize data with defaults instead of rejecting
         const sanitizedEmp = {
           employeeId: emp.employeeId || `UNKNOWN-${row}`,
@@ -1564,51 +1515,75 @@ const addEmployeesFromExcel = async (req, res, next) => {
 
         // Check duplicates (excluding email)
         if (existingEmployeeIds.has(sanitizedEmp.employeeId)) {
-
           errors.push({ row, message: `Employee ID already exists: ${sanitizedEmp.employeeId}` });
           continue;
         }
         if (sanitizedEmp.phone && existingPhones.has(sanitizedEmp.phone)) {
-
           errors.push({ row, message: `Phone already exists: ${sanitizedEmp.phone}` });
           continue;
         }
 
         // Parse salary with commas
         const parsedSalary = parseSalary(sanitizedEmp.salary);
-
-        
         if (isNaN(parsedSalary)) {
-
           sanitizedEmp.salary = 0;
         } else {
           sanitizedEmp.salary = parsedSalary;
         }
 
-        // Validate locationName - use default if not found
-        let locationId = locationMap[sanitizedEmp.locationName.toLowerCase()];
-        if (!locationId && sanitizedEmp.locationName) {
+      // ✅ IMPROVED: Better location matching with debugging
+let locationId;
 
-          locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
-        } else if (!locationId) {
-          locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
-        }
-
+if (sanitizedEmp.locationName) {
+  // Clean and normalize the location name
+  const cleanLocationName = sanitizedEmp.locationName.toString().toLowerCase().trim();
+  // Try exact match first
+  locationId = locationMap[cleanLocationName];
+  
+  if (!locationId) {
+    // Try fuzzy matching for common variations
+    const availableLocations = Object.keys(locationMap);
+    const fuzzyMatch = availableLocations.find(loc => {
+      const cleanLoc = loc.toLowerCase().trim();
+      const cleanInput = cleanLocationName;
+      
+      return (
+        cleanLoc.includes(cleanInput) || 
+        cleanInput.includes(cleanLoc) ||
+        cleanLoc.replace(/\s+/g, '') === cleanInput.replace(/\s+/g, '') // Remove spaces
+      );
+    });
+    
+    if (fuzzyMatch) {
+      locationId = locationMap[fuzzyMatch];
+    } else {
+      // ❌ STRICT: Reject employee with invalid location (NO MORE FALLBACK TO SAME LOCATION)
+      errors.push({ 
+        row, 
+        message: `Invalid location "${sanitizedEmp.locationName}". Available locations: ${Object.keys(locationMap).join(', ')}` 
+      });
+      continue; // Skip this employee instead of assigning wrong location
+    }
+  } else {
+  }
+} else {
+  // Handle missing location
+  errors.push({ 
+    row, 
+    message: `Location is required but not provided` 
+  });
+  continue; // Skip this employee
+}
         // Parse joinDate with proper date handling
         let parsedJoinDate;
-
-
         if (sanitizedEmp.joinDate) {
           parsedJoinDate = parseExcelDate(sanitizedEmp.joinDate);
           
           if (!parsedJoinDate) {
-
             parsedJoinDate = new Date();
           } else {
-
           }
         } else {
-
           parsedJoinDate = new Date();
         }
 
@@ -1617,10 +1592,8 @@ const addEmployeesFromExcel = async (req, res, next) => {
         const minDate = new Date('1900-01-01');
 
         if (parsedJoinDate > now) {
-
           parsedJoinDate = new Date();
         } else if (parsedJoinDate < minDate) {
-
           parsedJoinDate = new Date();
         }
 
@@ -1671,14 +1644,13 @@ const addEmployeesFromExcel = async (req, res, next) => {
         };
 
         validEmployees.push(validEmployee);
-
-
       } catch (err) {
-
         errors.push({ row, message: err.message });
       }
-    }    if (validEmployees.length === 0) {
+    }
 
+
+    if (validEmployees.length === 0) {
       return res.status(400).json({
         message: "No valid employees to register",
         totalProcessed: employees.length,
@@ -1690,13 +1662,8 @@ const addEmployeesFromExcel = async (req, res, next) => {
         }
       });
     }
-
-
-
     try {
       // Initialize monthly leaves before insertion
-
-      
       for (const employee of validEmployees) {
         const tempEmployee = {
           employeeId: employee.employeeId,
@@ -1710,9 +1677,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
           employee.monthlyLeaves = tempEmployee.monthlyLeaves;
         }
       }
-      
-
-
       const insertResult = await Employee.insertMany(validEmployees, { 
         ordered: false,
         rawResult: true 
@@ -1721,7 +1685,10 @@ const addEmployeesFromExcel = async (req, res, next) => {
       const insertedCount = insertResult.insertedCount || insertResult.length;
       const insertedEmployees = insertResult.ops || insertResult.mongoose?.results || insertResult;
 
-      const totalEmployeesInDB = await Employee.countDocuments({});      res.status(201).json({
+      const totalEmployeesInDB = await Employee.countDocuments({});
+     
+
+      res.status(201).json({
         message: `Successfully processed ${insertedCount} employees${errors.length > 0 ? ` with ${errors.length} errors` : ''}`,
         count: insertedCount,
         employees: insertedEmployees,
@@ -1735,12 +1702,15 @@ const addEmployeesFromExcel = async (req, res, next) => {
         errors: errors.length > 0 ? errors : undefined
       });
 
-    } catch (insertError) {      if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
+    } catch (insertError) {
+  
+      
+      if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
         const insertedCount = insertError.result?.insertedCount || 0;
         const writeErrors = insertError.writeErrors || [];
-        
-
-        writeErrors.forEach((err, index) => {        });
+        writeErrors.forEach((err, index) => {
+    
+        });
 
         const insertedEmployees = insertError.insertedDocs || [];
 
@@ -1775,8 +1745,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
     }
 
   } catch (error) {
-
-    
     if (error instanceof AppError) {
       return res.status(error.statusCode).json({
         message: error.message,
