@@ -180,6 +180,7 @@ export const getLeaveReport = async (req, res) => {
       const totalAvailableLeaves = (monthlyLeave.allocated || 0) + (monthlyLeave.carriedForward || 0);
       const rawTaken = monthlyLeave.taken || 0;
       const displayedTaken = Math.min(rawTaken, totalAvailableLeaves);
+      const unpaidLeaves = Math.max(0, rawTaken - totalAvailableLeaves);
       
       return {
         ...emp,
@@ -190,6 +191,7 @@ export const getLeaveReport = async (req, res) => {
           taken: parseFloat(displayedTaken.toFixed(2)), // ✅ Capped for display
           carriedForward: monthlyLeave.carriedForward || 0,
           available: parseFloat(Math.max(0, totalAvailableLeaves - displayedTaken).toFixed(2)),
+          unpaidLeaves: parseFloat(unpaidLeaves.toFixed(2)),
           // Optional: Keep raw data for debugging
           actualTaken: parseFloat(rawTaken.toFixed(2)),
         }],
@@ -200,6 +202,7 @@ export const getLeaveReport = async (req, res) => {
     const summary = {
       totalAvailable: 0,
       totalUsed: 0,
+      totalUnpaidLeaves: 0,
       totalCarriedForward: 0,
     };
 
@@ -207,6 +210,7 @@ export const getLeaveReport = async (req, res) => {
       const monthlyLeave = emp.monthlyLeaves[0];
       summary.totalAvailable += monthlyLeave.available || 0;
       summary.totalUsed += monthlyLeave.taken || 0; // Now uses capped values
+      summary.totalUnpaidLeaves += monthlyLeave.unpaidLeaves || 0; // ✅ NEW
       summary.totalCarriedForward += monthlyLeave.carriedForward || 0;
     });
 
