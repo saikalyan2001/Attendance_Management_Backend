@@ -1327,19 +1327,20 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
     let monthlyAllocation = 2; // Default value
     
     if (settings && employee.location) {
-      const locationSetting = settings.locationLeaveSettings?.find(setting => {
-        // ✅ NULL-SAFE: Check if both location values exist before calling toString()
-        if (!setting.location || !employee.location) {
-          return false;
-        }
-        
-        try {
-          return setting.location.toString() === employee.location.toString();
-        } catch (error) {
-          console.log(`⚠️ Error comparing locations for ${employee.employeeId}:`, error.message);
-          return false;
-        }
-      });
+     const locationSetting = settings.locationLeaveSettings?.find(setting => {
+    // Enhanced null-safe comparison
+    if (!setting || !setting.location || !employee || !employee.location) {
+        return false;
+    }
+    try {
+        const settingLocationId = setting.location._id || setting.location;
+        const employeeLocationId = employee.location._id || employee.location;
+        return settingLocationId.toString() === employeeLocationId.toString();
+    } catch (error) {
+        console.log('Error comparing locations for', employee?.employeeId, error.message);
+        return false;
+    }
+});
       
       if (locationSetting) {
         monthlyAllocation = locationSetting.paidLeavesPerYear / 12;
