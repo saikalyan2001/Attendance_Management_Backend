@@ -1315,28 +1315,41 @@ const parseExcelDate = (dateValue) => {
 // In controllers/admin/employeeController.js - Fix the initialization
 const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
   if (!employee.monthlyLeaves || employee.monthlyLeaves.length === 0) {
+    console.log(`🔧 Initializing monthlyLeaves WITHOUT automatic carry forward for ${employee.employeeId}`);
+    
     const joinDate = new Date(employee.joinDate);
     const joinYear = joinDate.getFullYear();
     const joinMonth = joinDate.getMonth() + 1;
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth() + 1;
 
-    // Get allocation...
-    let monthlyAllocation = 2;
+    // ✅ FIXED: Null-safe location allocation
+    let monthlyAllocation = 2; // Default value
+    
     if (settings && employee.location) {
-      const locationSetting = settings.locationLeaveSettings?.find(
-        setting => setting.location.toString() === employee.location.toString()
-      );
+      const locationSetting = settings.locationLeaveSettings?.find(setting => {
+        // ✅ NULL-SAFE: Check if both location values exist before calling toString()
+        if (!setting.location || !employee.location) {
+          return false;
+        }
+        
+        try {
+          return setting.location.toString() === employee.location.toString();
+        } catch (error) {
+          console.log(`⚠️ Error comparing locations for ${employee.employeeId}:`, error.message);
+          return false;
+        }
+      });
       
       if (locationSetting) {
         monthlyAllocation = locationSetting.paidLeavesPerYear / 12;
       } else {
-        monthlyAllocation = (settings.paidLeavesPerYear || 24) / 12;
+        monthlyAllocation = settings.paidLeavesPerYear / 24 * 12; // Fallback to settings default
       }
     }
 
     employee.monthlyLeaves = [];
-    
+
     // ✅ FIXED: Initialize all months with NO carry forward
     for (let y = joinYear; y <= currentYear; y++) {
       const startMonth = y === joinYear ? joinMonth : 1;
@@ -1348,15 +1361,17 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
           month: m,
           allocated: monthlyAllocation,
           taken: 0,
-          carriedForward: 0, // ✅ Always 0 - no automatic carry forward
-          available: monthlyAllocation, // ✅ Only allocated
-          isFinalized: false, // ✅ Default to not finalized
-          finalizedAt: null   // ✅ No finalization date
+          carriedForward: 0, // Always 0 - no automatic carry forward
+          available: monthlyAllocation, // Only allocated
+          isFinalized: false, // Default to not finalized
+          finalizedAt: null // No finalization date
         };
         
         employee.monthlyLeaves.push(monthlyLeave);
       }
     }
+
+    console.log(`✅ Initialized ${employee.monthlyLeaves.length} monthly leave records WITHOUT carry forward for ${employee.employeeId}`);
     return true;
   }
   return false;
@@ -1726,6 +1741,12 @@ const addEmployeesFromExcel = async (req, res, next) => {
     try {
       // Initialize monthly leaves before insertion
       for (const employee of validEmployees) {
+
+          if (!employee.location) {
+    console.log(`⚠️ Warning: Employee ${employee.employeeId} has no location, skipping monthly leaves initialization`);
+    continue;
+  }
+
         const tempEmployee = {
           employeeId: employee.employeeId,
           joinDate: employee.joinDate,
@@ -1768,6 +1789,7 @@ const addEmployeesFromExcel = async (req, res, next) => {
       });
 
     } catch (insertError) {
+      console.log(`❌ Failed to initialize monthly leaves for ${employee.employeeId}:`, initError.message);
       console.log('❌ Database insertion had errors:', {
         name: insertError.name,
         code: insertError.code,
