@@ -107,4 +107,27 @@ attendanceSchema.index(
   }
 );
 
+// ✅ Pre-save hook to prevent duplicates
+attendanceSchema.pre('save', async function(next) {
+  if (this.isNew) {
+    const dateOnly = this.date.split('T')[0];
+    
+    const existing = await this.constructor.findOne({
+      employee: this.employee,
+      location: this.location,
+      date: { $regex: `^${dateOnly}`, $options: 'i' },
+      isDeleted: { $ne: true },
+      _id: { $ne: this._id }
+    });
+    
+    if (existing) {
+      const error = new Error(`Attendance already exists for employee ${this.employee} on ${dateOnly}`);
+      error.code = 11000; // Duplicate key error code
+      return next(error);
+    }
+  }
+  next();
+});
+
+
 export default mongoose.model('Attendance', attendanceSchema);
