@@ -1371,7 +1371,12 @@ const addEmployeesFromExcel = async (req, res, next) => {
     }
 
     const excelFile = req.files.excelFile[0];
-  
+    console.log('📄 Excel file details:', {
+      originalname: excelFile.originalname,
+      mimetype: excelFile.mimetype,
+      size: excelFile.size,
+      path: excelFile.path
+    });
 
     const documentFiles = req.files.documents || [];
     const requiredHeaders = [
@@ -1485,7 +1490,10 @@ locations.forEach((loc) => {
     const existingEmployeeIds = new Set(existingEmployees.map(e => e.employeeId));
     const existingPhones = new Set(existingEmployees.map(e => e.phone));
 
- 
+    console.log('📋 Found existing duplicates:', {
+      employeeIds: existingEmployeeIds.size,
+      phones: existingPhones.size
+    });
     for (let i = 0; i < employees.length; i++) {
       const emp = employees[i];
       const row = i + 2;
@@ -1649,6 +1657,11 @@ if (sanitizedEmp.locationName) {
       }
     }
 
+    console.log('📊 Processing summary:', {
+      totalRows: employees.length,
+      validEmployees: validEmployees.length,
+      errors: errors.length
+    });
 
     if (validEmployees.length === 0) {
       return res.status(400).json({
@@ -1686,7 +1699,10 @@ if (sanitizedEmp.locationName) {
       const insertedEmployees = insertResult.ops || insertResult.mongoose?.results || insertResult;
 
       const totalEmployeesInDB = await Employee.countDocuments({});
-     
+      console.log('📊 Database verification:', {
+        insertedThisSession: insertedCount,
+        totalInDatabase: totalEmployeesInDB
+      });
 
       res.status(201).json({
         message: `Successfully processed ${insertedCount} employees${errors.length > 0 ? ` with ${errors.length} errors` : ''}`,
@@ -1703,13 +1719,25 @@ if (sanitizedEmp.locationName) {
       });
 
     } catch (insertError) {
-  
+      console.log('❌ Database insertion had errors:', {
+        name: insertError.name,
+        code: insertError.code,
+        message: insertError.message,
+        writeErrors: insertError.writeErrors?.length || 0
+      });
       
       if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
         const insertedCount = insertError.result?.insertedCount || 0;
         const writeErrors = insertError.writeErrors || [];
         writeErrors.forEach((err, index) => {
-    
+          console.log(`Error ${index + 1}:`, {
+            index: err.index,
+            code: err.code,
+            errmsg: err.errmsg,
+            keyPattern: err.err?.keyPattern,
+            keyValue: err.err?.keyValue,
+            operationType: err.err?.op
+          });
         });
 
         const insertedEmployees = insertError.insertedDocs || [];
