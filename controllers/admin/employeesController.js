@@ -58,6 +58,7 @@ const calculateProratedLeaves = (joinDate, paidLeavesPerYear) => {
   return paidLeavesPerYear;
 };
 
+
 // @desc    Update employee advance
 // @route   PUT /api/admin/employees/:id/advance
 // @access  Private/Admin
@@ -592,13 +593,23 @@ const redistributeMonthlyLeaves = async (employee, paidLeaves) => {
   const currentDate = new Date();
   const currentYear = currentDate.getFullYear();
   const currentMonth = currentDate.getMonth() + 1;
+
+    
+  // ✅ DEBUG: Add logging
+
+
+
   
   // Calculate remaining months including current month
   const monthsRemainingInYear = 12 - currentMonth + 1;
   const perMonthAllocation = paidLeaves.available / monthsRemainingInYear;
+
+
   
   // Force change detection: Clone and replace monthlyLeaves array
   const updatedMonthlyLeaves = [...employee.monthlyLeaves];
+
+  const roundedAllocation = Math.round(perMonthAllocation * 100) / 100; // 2 decimal places
   
   // Update only current and future months in the current year
   for (let i = 0; i < updatedMonthlyLeaves.length; i++) {
@@ -610,11 +621,12 @@ const redistributeMonthlyLeaves = async (employee, paidLeaves) => {
       // Create new object to trigger change detection
       updatedMonthlyLeaves[i] = {
         ...ml,
-        allocated: Math.round(perMonthAllocation * 10) / 10,
+        allocated: roundedAllocation,
         taken: previousTaken,
         carriedForward: ml.carriedForward || 0,
-        available: Math.max(0, Math.round(perMonthAllocation * 10) / 10 - previousTaken)
+        available: Math.max(0, roundedAllocation - previousTaken)
       };
+
     }
   }
   
@@ -1240,30 +1252,156 @@ const getEmployeeAdvances = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Add employees from Excel file
-// @route   POST /api/admin/employees/excel
-// @access  Private/Admin
+
+// ✅ ENHANCED: Excel date parsing helper function - add this before addEmployeesFromExcel
+const parseExcelDate = (dateValue) => {
+  if (!dateValue) return null;
+
+
+
+  // If it's already a Date object from cellDates: true
+  if (dateValue instanceof Date && !isNaN(dateValue.getTime())) {
+
+    return dateValue;
+  }
+
+  // If it's a number (Excel serial date)
+  if (typeof dateValue === 'number') {
+
+    try {
+      // Use XLSX built-in date conversion
+      const parsedDate = XLSX.SSF.parse_date_code(dateValue);
+      if (parsedDate && parsedDate.y && parsedDate.m && parsedDate.d) {
+        const jsDate = new Date(parsedDate.y, parsedDate.m - 1, parsedDate.d);
+        if (!isNaN(jsDate.getTime())) {
+
+          return jsDate;
+        }
+      }
+    } catch (error) {
+
+    }
+  }
+
+  // If it's a string, try various formats
+  if (typeof dateValue === 'string') {
+    const cleanDateStr = dateValue.trim();
+
+    
+    // Try different date formats
+    const dateFormats = [
+      // DD.MM.YYYY format (common in European Excel)
+      /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/,
+      // DD/MM/YYYY format
+      /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/,
+      // YYYY-MM-DD format
+      /^(\d{4})-(\d{1,2})-(\d{1,2})$/,
+    ];
+
+    for (const format of dateFormats) {
+      const match = cleanDateStr.match(format);
+      if (match) {
+        let year, month, day;
+        
+        if (format.source.startsWith('^(\\d{4})')) {
+          // YYYY-MM-DD format
+          [, year, month, day] = match;
+        } else {
+          // DD.MM.YYYY or DD/MM/YYYY format
+          [, day, month, year] = match;
+        }
+        
+        const parsedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+        
+        if (!isNaN(parsedDate.getTime())) {
+
+          return parsedDate;
+        }
+      }
+    }
+
+    // Try native Date parsing as fallback
+    const nativeDate = new Date(cleanDateStr);
+    if (!isNaN(nativeDate.getTime())) {
+
+      return nativeDate;
+    }
+  }
+
+
+  return null;
+};
+
+// ✅ ENHANCED: Monthly leaves initialization with proper carry forward
+// In controllers/admin/employeeController.js - Fix the initialization
+const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
+  if (!employee.monthlyLeaves || employee.monthlyLeaves.length === 0) {
+
+    
+    const joinDate = new Date(employee.joinDate);
+    const joinYear = joinDate.getFullYear();
+    const joinMonth = joinDate.getMonth() + 1;
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1;
+
+    // Get allocation...
+    let monthlyAllocation = 2;
+    if (settings && employee.location) {
+      const locationSetting = settings.locationLeaveSettings?.find(
+        setting => setting.location.toString() === employee.location.toString()
+      );
+      
+      if (locationSetting) {
+        monthlyAllocation = locationSetting.paidLeavesPerYear / 12;
+      } else {
+        monthlyAllocation = (settings.paidLeavesPerYear || 24) / 12;
+      }
+    }
+
+    employee.monthlyLeaves = [];
+    
+    // ✅ FIXED: Initialize all months with NO carry forward
+    for (let y = joinYear; y <= currentYear; y++) {
+      const startMonth = y === joinYear ? joinMonth : 1;
+      const endMonth = y === currentYear ? currentMonth : 12;
+      
+      for (let m = startMonth; m <= endMonth; m++) {
+        const monthlyLeave = {
+          year: y,
+          month: m,
+          allocated: monthlyAllocation,
+          taken: 0,
+          carriedForward: 0, // ✅ Always 0 - no automatic carry forward
+          available: monthlyAllocation, // ✅ Only allocated
+          isFinalized: false, // ✅ Default to not finalized
+          finalizedAt: null   // ✅ No finalization date
+        };
+        
+        employee.monthlyLeaves.push(monthlyLeave);
+      }
+    }
+    
+
+    return true;
+  }
+  return false;
+};
+
+
+// ✅ COMPLETE UPDATED: Add employees from Excel file with prorated leave fix
 const addEmployeesFromExcel = async (req, res, next) => {
   try {
-    console.log('📁 Starting Excel processing...');
-    console.log('📋 Request files:', req.files ? Object.keys(req.files) : 'No files');
-    console.log('👤 User info:', req.user ? req.user._id : 'No user');
+
+
+
 
     if (!req.files || !req.files.excelFile || req.files.excelFile.length === 0) {
-      console.log('❌ No Excel file found in request');
+
       return next(new AppError("No Excel file uploaded", 400));
     }
 
-    const excelFile = req.files.excelFile[0];
-    console.log('📄 Excel file details:', {
-      originalname: excelFile.originalname,
-      mimetype: excelFile.mimetype,
-      size: excelFile.size,
-      path: excelFile.path
-    });
+    const excelFile = req.files.excelFile[0];    const documentFiles = req.files.documents || [];
 
-    const documentFiles = req.files.documents || [];
-    console.log('📎 Document files count:', documentFiles.length);
 
     const requiredHeaders = [
       "employeeId", "name", "email", "designation", "department", 
@@ -1273,10 +1411,10 @@ const addEmployeesFromExcel = async (req, res, next) => {
 
     let employees = [];
     const fileExtension = excelFile.originalname.split(".").pop().toLowerCase();
-    console.log('📊 File extension:', fileExtension);
+
 
     if (fileExtension === "csv") {
-      console.log('🔍 Processing CSV file...');
+
       const fileContent = await fs.readFile(excelFile.path, 'utf8');
       const records = parse(fileContent, {
         columns: true,
@@ -1286,29 +1424,36 @@ const addEmployeesFromExcel = async (req, res, next) => {
       });
       employees = records;
     } else if (["xlsx", "xls"].includes(fileExtension)) {
-      console.log('🔍 Processing Excel file...');
+
       const fileBuffer = await fs.readFile(excelFile.path);
-      const workbook = XLSX.read(fileBuffer, { type: "buffer", dateNF: "yyyy-mm-dd" });
+      
+      const workbook = XLSX.read(fileBuffer, { 
+        type: "buffer", 
+        cellDates: true,
+        dateNF: "yyyy-mm-dd",
+        raw: false
+      });
+      
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
       
-      console.log('📋 Sheet name:', sheetName);
-      console.log('📊 Sheet range:', sheet['!ref']);
+
+
       
       employees = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         blankrows: false,
-        raw: false,
-        dateNF: "yyyy-mm-dd",
+        defval: null,
+        raw: false
       });
 
       if (employees.length < 1) {
-        console.log('❌ Excel file is empty');
+
         return next(new AppError("Excel file is empty", 400));
       }
 
-      const headers = employees[0].map((h) => h.toString().trim());
-      console.log('📋 Headers found:', headers);
+      const headers = employees[0].map((h) => h ? h.toString().trim() : '');
+
       
       employees = employees
         .slice(1)
@@ -1323,21 +1468,21 @@ const addEmployeesFromExcel = async (req, res, next) => {
           return Object.values(emp).some((val) => val !== null && val !== "");
         });
     } else {
-      console.log('❌ Unsupported file format:', fileExtension);
+
       return next(new AppError("Unsupported file format", 400));
     }
 
-    console.log('📊 Total rows parsed:', employees.length);
+
     if (employees.length > 0) {
-      console.log('👤 Sample employee data:', JSON.stringify(employees[0], null, 2));
+
     }
 
     const fileHeaders = employees.length > 0 ? Object.keys(employees[0]) : [];
-    console.log('📋 File headers:', fileHeaders);
+
 
     const missingHeaders = requiredHeaders.filter((h) => !fileHeaders.includes(h));
     if (missingHeaders.length > 0) {
-      console.log('❌ Missing headers:', missingHeaders);
+
       return next(new AppError(`Missing required headers: ${missingHeaders.join(", ")}`, 400));
     }
 
@@ -1366,17 +1511,17 @@ const addEmployeesFromExcel = async (req, res, next) => {
     locations.forEach((loc) => {
       locationMap[loc.name.toLowerCase()] = loc._id;
     });
-    console.log('📍 Available locations:', Object.keys(locationMap));
 
-    // Fetch settings
-    const settings = await Settings.findOne();
+
+    // Fetch settings with populated location data
+    const settings = await Settings.findOne().populate('locationLeaveSettings.location');
     if (!settings) {
-      console.log('❌ Settings not found');
+
       return next(new AppError("Settings not found", 500));
     }
 
-    // ✅ Check for duplicates (excluding email - duplicates allowed)
-    console.log('🔍 Checking for existing duplicates in database...');
+    // Check for duplicates (excluding email - duplicates allowed)
+
     const employeeIds = employees.map(emp => emp.employeeId).filter(Boolean);
     const phones = employees.map(emp => emp.phone).filter(Boolean);
 
@@ -1384,156 +1529,156 @@ const addEmployeesFromExcel = async (req, res, next) => {
       $or: [
         { employeeId: { $in: employeeIds } },
         { phone: { $in: phones } }
-        // ✅ No email check - duplicates allowed
       ]
     }).select('employeeId phone').lean();
 
     const existingEmployeeIds = new Set(existingEmployees.map(e => e.employeeId));
-    const existingPhones = new Set(existingEmployees.map(e => e.phone));
+    const existingPhones = new Set(existingEmployees.map(e => e.phone));    for (let i = 0; i < employees.length; i++) {
+      const emp = employees[i];
+      const row = i + 2;
+      
+      try {
 
-    console.log('📋 Found existing duplicates:', {
-      employeeIds: existingEmployeeIds.size,
-      phones: existingPhones.size
-      // ✅ No email duplicates check
-    });
 
-   console.log('⚙️ Processing employees for validation...');
-for (let i = 0; i < employees.length; i++) {
-  const emp = employees[i];
-  const row = i + 2;
-  
-  try {
-    console.log(`🔍 Processing row ${row}:`, emp.employeeId, 'Salary:', emp.salary);
+        // Sanitize data with defaults instead of rejecting
+        const sanitizedEmp = {
+          employeeId: emp.employeeId || `UNKNOWN-${row}`,
+          name: emp.name || 'Name Not Provided',
+          email: emp.email || '',
+          designation: emp.designation || 'Not Specified', 
+          department: emp.department || 'General',
+          salary: emp.salary || '0',
+          locationName: emp.locationName || '',
+          phone: emp.phone || '',
+          joinDate: emp.joinDate || null,
+          accountNo: emp.accountNo || '',
+          ifscCode: emp.ifscCode || '',
+          bankName: emp.bankName || '',
+          accountHolder: emp.accountHolder || ''
+        };
 
-    // ✅ UPDATED: Sanitize data with defaults instead of rejecting
-    const sanitizedEmp = {
-      employeeId: emp.employeeId || `UNKNOWN-${row}`,
-      name: emp.name || 'Name Not Provided',
-      email: emp.email || '',
-      designation: emp.designation || 'Not Specified', 
-      department: emp.department || 'General',
-      salary: emp.salary || '0',
-      locationName: emp.locationName || '',
-      phone: emp.phone || '',
-      joinDate: emp.joinDate || new Date().toISOString().split('T')[0],
-      accountNo: emp.accountNo || '',
-      ifscCode: emp.ifscCode || '',
-      bankName: emp.bankName || '',
-      accountHolder: emp.accountHolder || ''
-    };
+        // Only reject if critical fields are completely unusable
+        if (!sanitizedEmp.employeeId || sanitizedEmp.employeeId.startsWith('UNKNOWN-')) {
+          sanitizedEmp.employeeId = `AUTO-${Date.now()}-${row}`;
+        }
 
-    // ✅ Only reject if critical fields are completely unusable
-    if (!sanitizedEmp.employeeId || sanitizedEmp.employeeId.startsWith('UNKNOWN-')) {
-      // If no employeeId provided, generate one
-      sanitizedEmp.employeeId = `AUTO-${Date.now()}-${row}`;
-    }
+        // Check duplicates (excluding email)
+        if (existingEmployeeIds.has(sanitizedEmp.employeeId)) {
 
-    // ✅ Check duplicates (excluding email)
-    if (existingEmployeeIds.has(sanitizedEmp.employeeId)) {
-      console.log(`❌ Row ${row}: Duplicate Employee ID`);
-      errors.push({ row, message: `Employee ID already exists: ${sanitizedEmp.employeeId}` });
-      continue;
-    }
-    if (sanitizedEmp.phone && existingPhones.has(sanitizedEmp.phone)) {
-      console.log(`❌ Row ${row}: Duplicate Phone`);
-      errors.push({ row, message: `Phone already exists: ${sanitizedEmp.phone}` });
-      continue;
-    }
+          errors.push({ row, message: `Employee ID already exists: ${sanitizedEmp.employeeId}` });
+          continue;
+        }
+        if (sanitizedEmp.phone && existingPhones.has(sanitizedEmp.phone)) {
 
-    // Parse salary with commas
-    const parsedSalary = parseSalary(sanitizedEmp.salary);
-    console.log(`💰 Row ${row}: Salary "${sanitizedEmp.salary}" -> ${parsedSalary}`);
-    
-    if (isNaN(parsedSalary)) {
-      console.log(`⚠️ Row ${row}: Invalid salary, defaulting to 0`);
-      sanitizedEmp.salary = 0;
-    } else {
-      sanitizedEmp.salary = parsedSalary;
-    }
+          errors.push({ row, message: `Phone already exists: ${sanitizedEmp.phone}` });
+          continue;
+        }
 
-    // Validate locationName - use default if not found
-    let locationId = locationMap[sanitizedEmp.locationName.toLowerCase()];
-    if (!locationId && sanitizedEmp.locationName) {
-      console.log(`⚠️ Row ${row}: Location not found: ${sanitizedEmp.locationName}, using default`);
-      // Use first available location as default or create a default ObjectId
-      locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
-    } else if (!locationId) {
-      // No location provided, use first available location
-      locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
-    }
+        // Parse salary with commas
+        const parsedSalary = parseSalary(sanitizedEmp.salary);
 
-    // Parse joinDate with fallback
-    let parsedJoinDate;
-    if (sanitizedEmp.joinDate) {
-      if (typeof sanitizedEmp.joinDate === "number") {
-        parsedJoinDate = XLSX.SSF.parse_date_code(sanitizedEmp.joinDate);
-        parsedJoinDate = new Date(parsedJoinDate.y, parsedJoinDate.m - 1, parsedJoinDate.d);
-      } else {
-        parsedJoinDate = new Date(sanitizedEmp.joinDate);
-      }
-    } else {
-      parsedJoinDate = new Date(); // Default to current date
-    }
+        
+        if (isNaN(parsedSalary)) {
 
-    if (isNaN(parsedJoinDate)) {
-      console.log(`⚠️ Row ${row}: Invalid join date, using current date`);
-      parsedJoinDate = new Date();
-    }
+          sanitizedEmp.salary = 0;
+        } else {
+          sanitizedEmp.salary = parsedSalary;
+        }
 
-    // Calculate prorated leaves
-    const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
-    const documents = documentMap[sanitizedEmp.employeeId] || [];
+        // Validate locationName - use default if not found
+        let locationId = locationMap[sanitizedEmp.locationName.toLowerCase()];
+        if (!locationId && sanitizedEmp.locationName) {
 
-    const validEmployee = {
-      employeeId: sanitizedEmp.employeeId,
-      name: sanitizedEmp.name,
-      email: sanitizedEmp.email.toLowerCase(),
-      designation: sanitizedEmp.designation,
-      department: sanitizedEmp.department,
-      salary: sanitizedEmp.salary,
-      location: locationId,
-      phone: sanitizedEmp.phone,
-      joinDate: parsedJoinDate,
-      bankDetails: {
-        accountNo: sanitizedEmp.accountNo,
-        ifscCode: sanitizedEmp.ifscCode,
-        bankName: sanitizedEmp.bankName,
-        accountHolder: sanitizedEmp.accountHolder,
-      },
-      paidLeaves: {
-        available: proratedLeaves,
-        used: 0,
-        carriedForward: 0,
-      },
-      documents,
-      createdBy: req.user._id,
-      status: "active",
-      employmentHistory: [
-        {
-          startDate: parsedJoinDate,
+          locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
+        } else if (!locationId) {
+          locationId = Object.values(locationMap)[0] || new mongoose.Types.ObjectId();
+        }
+
+        // Parse joinDate with proper date handling
+        let parsedJoinDate;
+
+
+        if (sanitizedEmp.joinDate) {
+          parsedJoinDate = parseExcelDate(sanitizedEmp.joinDate);
+          
+          if (!parsedJoinDate) {
+
+            parsedJoinDate = new Date();
+          } else {
+
+          }
+        } else {
+
+          parsedJoinDate = new Date();
+        }
+
+        // Validate that the date is reasonable (not in future, not too old)
+        const now = new Date();
+        const minDate = new Date('1900-01-01');
+
+        if (parsedJoinDate > now) {
+
+          parsedJoinDate = new Date();
+        } else if (parsedJoinDate < minDate) {
+
+          parsedJoinDate = new Date();
+        }
+
+        // Calculate prorated leaves
+        const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
+        
+        // ✅ DETERMINE: If employee is prorated  
+        const joinYear = parsedJoinDate.getFullYear();
+        const joinMonth = parsedJoinDate.getMonth() + 1;
+        const currentYear = new Date().getFullYear();
+        const isProrated = (joinMonth > 1) && (joinYear >= currentYear);
+        
+        const documents = documentMap[sanitizedEmp.employeeId] || [];
+
+        const validEmployee = {
+          employeeId: sanitizedEmp.employeeId,
+          name: sanitizedEmp.name,
+          email: sanitizedEmp.email.toLowerCase(),
+          designation: sanitizedEmp.designation,
+          department: sanitizedEmp.department,
+          salary: sanitizedEmp.salary,
+          location: locationId,
+          phone: sanitizedEmp.phone,
+          joinDate: parsedJoinDate,
+          bankDetails: {
+            accountNo: sanitizedEmp.accountNo,
+            ifscCode: sanitizedEmp.ifscCode,
+            bankName: sanitizedEmp.bankName,
+            accountHolder: sanitizedEmp.accountHolder,
+          },
+          paidLeaves: {
+            allocated: proratedLeaves,    // ✅ CRITICAL FIX: Add allocated field
+            available: proratedLeaves,    // ✅ Keep available
+            used: 0,
+            carriedForward: 0,
+          },
+          documents,
+          createdBy: req.user._id,
           status: "active",
-        },
-      ],
-    };
+          isProratedEmployee: isProrated, // ✅ Add prorated flag
+          employmentHistory: [
+            {
+              startDate: parsedJoinDate,
+              status: "active",
+            },
+          ],
+          monthlyLeaves: [],
+        };
 
-    validEmployees.push(validEmployee);
-    console.log(`✅ Row ${row}: Employee processed (with defaults if needed) - Salary: ${sanitizedEmp.salary}`);
-
-  } catch (err) {
-    console.log(`❌ Row ${row}: Processing error:`, err.message);
-    errors.push({ row, message: err.message });
-  }
-}
+        validEmployees.push(validEmployee);
 
 
-    console.log('📊 Processing summary:', {
-      totalRows: employees.length,
-      validEmployees: validEmployees.length,
-      errors: errors.length
-    });
+      } catch (err) {
 
-    if (validEmployees.length === 0) {
-      console.log('❌ No valid employees to register');
+        errors.push({ row, message: err.message });
+      }
+    }    if (validEmployees.length === 0) {
+
       return res.status(400).json({
         message: "No valid employees to register",
         totalProcessed: employees.length,
@@ -1546,103 +1691,91 @@ for (let i = 0; i < employees.length; i++) {
       });
     }
 
-    console.log('💾 Attempting to insert', validEmployees.length, 'employees into database...');
+
 
     try {
-  const insertResult = await Employee.insertMany(validEmployees, { 
-    ordered: false,
-    rawResult: true 
-  });
+      // Initialize monthly leaves before insertion
 
-// After successful insertion
-const insertedCount = insertResult.insertedCount || insertResult.length;
-const insertedEmployees = insertResult.ops || insertResult.mongoose?.results || insertResult;
-
-// ✅ Verify actual database count
-const totalEmployeesInDB = await Employee.countDocuments({});
-console.log('📊 Database verification:', {
-  insertedThisSession: insertedCount,
-  totalInDatabase: totalEmployeesInDB
-});
-
-res.status(201).json({
-  message: `Successfully processed ${insertedCount} employees${errors.length > 0 ? ` with ${errors.length} errors` : ''}`,
-  count: insertedCount,
-  employees: insertedEmployees,
-  databaseTotal: totalEmployeesInDB, // ✅ Include total count
-  summary: {
-    totalProcessed: employees.length,
-    successfullyInserted: insertedCount,
-    validationErrors: errors.length,
-    duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length
-  },
-  errors: errors.length > 0 ? errors : undefined
-});
-
-
-}  catch (insertError) {
-  console.log('❌ Database insertion had errors:', {
-    name: insertError.name,
-    code: insertError.code,
-    message: insertError.message,
-    writeErrors: insertError.writeErrors?.length || 0
-  });
-  
-  // Handle BulkWriteError case  
-  if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
-    const insertedCount = insertError.result?.insertedCount || 0;
-    const writeErrors = insertError.writeErrors || [];
-    
-    // ✅ ENHANCED: Log detailed error information
-    console.log('📊 Detailed BulkWriteError analysis:');
-    writeErrors.forEach((err, index) => {
-      console.log(`Error ${index + 1}:`, {
-        index: err.index,
-        code: err.code,
-        errmsg: err.errmsg,
-        keyPattern: err.err?.keyPattern,
-        keyValue: err.err?.keyValue,
-        operationType: err.err?.op
-      });
-    });
-
-    const insertedEmployees = insertError.insertedDocs || [];
-
-    return res.status(201).json({
-      message: `Partially successful: ${insertedCount} employees inserted, ${writeErrors.length} failed`,
-      count: insertedCount,
-      employees: insertedEmployees,
-      summary: {
-        totalProcessed: employees.length,
-        successfullyInserted: insertedCount,
-        validationErrors: errors.length,
-        duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length,
-        insertionErrors: writeErrors.length
-      },
-      errors: errors.length > 0 ? errors : undefined,
-      insertionErrors: writeErrors.map((err) => ({
-        index: err.index,
-        code: err.code,
-        // ✅ IMPROVED: Extract actual error messages
-        error: err.errmsg || 
-               err.err?.errmsg || 
-               (err.err?.code === 11000 ? `Duplicate key: ${JSON.stringify(err.err.keyValue)}` : '') ||
-               err.message || 
-               'Unknown insertion error',
-        details: {
-          keyPattern: err.err?.keyPattern,
-          keyValue: err.err?.keyValue
+      
+      for (const employee of validEmployees) {
+        const tempEmployee = {
+          employeeId: employee.employeeId,
+          joinDate: employee.joinDate,
+          location: employee.location,
+          monthlyLeaves: []
+        };
+        
+        const wasInitialized = await initializeMonthlyLeavesForEmployee(tempEmployee, settings);
+        if (wasInitialized) {
+          employee.monthlyLeaves = tempEmployee.monthlyLeaves;
         }
-      }))
-    });
-  }
-  throw insertError;
-}
+      }
+      
 
 
+      const insertResult = await Employee.insertMany(validEmployees, { 
+        ordered: false,
+        rawResult: true 
+      });
+
+      const insertedCount = insertResult.insertedCount || insertResult.length;
+      const insertedEmployees = insertResult.ops || insertResult.mongoose?.results || insertResult;
+
+      const totalEmployeesInDB = await Employee.countDocuments({});      res.status(201).json({
+        message: `Successfully processed ${insertedCount} employees${errors.length > 0 ? ` with ${errors.length} errors` : ''}`,
+        count: insertedCount,
+        employees: insertedEmployees,
+        databaseTotal: totalEmployeesInDB,
+        summary: {
+          totalProcessed: employees.length,
+          successfullyInserted: insertedCount,
+          validationErrors: errors.length,
+          duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length
+        },
+        errors: errors.length > 0 ? errors : undefined
+      });
+
+    } catch (insertError) {      if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
+        const insertedCount = insertError.result?.insertedCount || 0;
+        const writeErrors = insertError.writeErrors || [];
+        
+
+        writeErrors.forEach((err, index) => {        });
+
+        const insertedEmployees = insertError.insertedDocs || [];
+
+        return res.status(201).json({
+          message: `Partially successful: ${insertedCount} employees inserted, ${writeErrors.length} failed`,
+          count: insertedCount,
+          employees: insertedEmployees,
+          summary: {
+            totalProcessed: employees.length,
+            successfullyInserted: insertedCount,
+            validationErrors: errors.length,
+            duplicatesSkipped: errors.filter(e => e.message.includes('already exists')).length,
+            insertionErrors: writeErrors.length
+          },
+          errors: errors.length > 0 ? errors : undefined,
+          insertionErrors: writeErrors.map((err) => ({
+            index: err.index,
+            code: err.code,
+            error: err.errmsg || 
+                   err.err?.errmsg || 
+                   (err.err?.code === 11000 ? `Duplicate key: ${JSON.stringify(err.err.keyValue)}` : '') ||
+                   err.message || 
+                   'Unknown insertion error',
+            details: {
+              keyPattern: err.err?.keyPattern,
+              keyValue: err.err?.keyValue
+            }
+          }))
+        });
+      }
+      throw insertError;
+    }
 
   } catch (error) {
-    console.log('❌ Overall function error:', error);
+
     
     if (error instanceof AppError) {
       return res.status(error.statusCode).json({
@@ -1657,6 +1790,8 @@ res.status(201).json({
     });
   }
 };
+
+
 
 // @desc    Get unique departments
 // @route   GET /api/admin/employees/departments
