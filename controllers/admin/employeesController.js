@@ -1315,42 +1315,28 @@ const parseExcelDate = (dateValue) => {
 // In controllers/admin/employeeController.js - Fix the initialization
 const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
   if (!employee.monthlyLeaves || employee.monthlyLeaves.length === 0) {
-    console.log(`🔧 Initializing monthlyLeaves WITHOUT automatic carry forward for ${employee.employeeId}`);
-    
     const joinDate = new Date(employee.joinDate);
     const joinYear = joinDate.getFullYear();
     const joinMonth = joinDate.getMonth() + 1;
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth() + 1;
 
-    // ✅ FIXED: Null-safe location allocation
-    let monthlyAllocation = 2; // Default value
-    
+    // Get allocation...
+    let monthlyAllocation = 2;
     if (settings && employee.location) {
-     const locationSetting = settings.locationLeaveSettings?.find(setting => {
-    // Enhanced null-safe comparison
-    if (!setting || !setting.location || !employee || !employee.location) {
-        return false;
-    }
-    try {
-        const settingLocationId = setting.location._id || setting.location;
-        const employeeLocationId = employee.location._id || employee.location;
-        return settingLocationId.toString() === employeeLocationId.toString();
-    } catch (error) {
-        console.log('Error comparing locations for', employee?.employeeId, error.message);
-        return false;
-    }
-});
+      const locationSetting = settings.locationLeaveSettings?.find(
+        setting => setting.location.toString() === employee.location.toString()
+      );
       
       if (locationSetting) {
         monthlyAllocation = locationSetting.paidLeavesPerYear / 12;
       } else {
-        monthlyAllocation = settings.paidLeavesPerYear / 24 * 12; // Fallback to settings default
+        monthlyAllocation = (settings.paidLeavesPerYear || 24) / 12;
       }
     }
 
     employee.monthlyLeaves = [];
-
+    
     // ✅ FIXED: Initialize all months with NO carry forward
     for (let y = joinYear; y <= currentYear; y++) {
       const startMonth = y === joinYear ? joinMonth : 1;
@@ -1362,17 +1348,15 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
           month: m,
           allocated: monthlyAllocation,
           taken: 0,
-          carriedForward: 0, // Always 0 - no automatic carry forward
-          available: monthlyAllocation, // Only allocated
-          isFinalized: false, // Default to not finalized
-          finalizedAt: null // No finalization date
+          carriedForward: 0, // ✅ Always 0 - no automatic carry forward
+          available: monthlyAllocation, // ✅ Only allocated
+          isFinalized: false, // ✅ Default to not finalized
+          finalizedAt: null   // ✅ No finalization date
         };
         
         employee.monthlyLeaves.push(monthlyLeave);
       }
     }
-
-    console.log(`✅ Initialized ${employee.monthlyLeaves.length} monthly leave records WITHOUT carry forward for ${employee.employeeId}`);
     return true;
   }
   return false;
@@ -1403,18 +1387,8 @@ const addEmployeesFromExcel = async (req, res, next) => {
 
     let employees = [];
     const fileExtension = excelFile.originalname.split(".").pop().toLowerCase();
-    
     if (fileExtension === "csv") {
-      // Handle CSV processing with better error handling
-      let fileContent;
-      if (excelFile.buffer) {
-        fileContent = excelFile.buffer.toString('utf8');
-      } else if (excelFile.path) {
-        fileContent = await fs.readFile(excelFile.path, 'utf8');
-      } else {
-        throw new Error('No file buffer or path available for CSV');
-      }
-      
+      const fileContent = await fs.readFile(excelFile.path, 'utf8');
       const records = parse(fileContent, {
         columns: true,
         trim: true,
@@ -1423,15 +1397,7 @@ const addEmployeesFromExcel = async (req, res, next) => {
       });
       employees = records;
     } else if (["xlsx", "xls"].includes(fileExtension)) {
-      // Handle Excel processing with better error handling
-      let fileBuffer;
-      if (excelFile.buffer) {
-        fileBuffer = excelFile.buffer;
-      } else if (excelFile.path) {
-        fileBuffer = await fs.readFile(excelFile.path);
-      } else {
-        throw new Error('No file buffer or path available for Excel');
-      }
+      const fileBuffer = await fs.readFile(excelFile.path);
       
       const workbook = XLSX.read(fileBuffer, { 
         type: "buffer", 
@@ -1453,14 +1419,7 @@ const addEmployeesFromExcel = async (req, res, next) => {
         return next(new AppError("Excel file is empty", 400));
       }
 
-      // ✅ FIXED: Null-safe header processing
-      const headers = employees[0].map((h) => {
-        if (h !== null && h !== undefined) {
-          return String(h).trim();
-        }
-        return '';
-      });
-      
+      const headers = employees[0].map((h) => h ? h.toString().trim() : '');
       employees = employees
         .slice(1)
         .map((row) => {
@@ -1475,6 +1434,8 @@ const addEmployeesFromExcel = async (req, res, next) => {
         });
     } else {
       return next(new AppError("Unsupported file format", 400));
+    }
+    if (employees.length > 0) {
     }
 
     const fileHeaders = employees.length > 0 ? Object.keys(employees[0]) : [];
@@ -1502,24 +1463,13 @@ const addEmployeesFromExcel = async (req, res, next) => {
       }
     });
 
-    // ✅ FIXED: Null-safe locationMap creation
-    const locations = await Location.find().select("name _id");
-    const locationMap = {};
-    
-    console.log('📍 Raw locations from database:', locations.map(loc => ({ name: loc.name, id: loc._id })));
-    
-    locations.forEach((loc) => {
-      if (loc.name && loc.name !== null && loc.name !== undefined) {
-        const cleanName = String(loc.name).toLowerCase().trim();
-        locationMap[cleanName] = loc._id;
-        console.log(`📍 Mapped: "${cleanName}" -> ${loc._id}`);
-      } else {
-        console.log(`⚠️ Skipped location with null/undefined name: ${loc._id}`);
-      }
-    });
-    
-    console.log('📍 Final locationMap keys:', Object.keys(locationMap));
-
+  // ✅ IMPROVED: Better locationMap creation with debugging
+const locations = await Location.find().select("name _id");
+const locationMap = {};
+locations.forEach((loc) => {
+  const cleanName = loc.name.toString().toLowerCase().trim();
+  locationMap[cleanName] = loc._id;
+});
     // Fetch settings with populated location data
     const settings = await Settings.findOne().populate('locationLeaveSettings.location');
     if (!settings) {
@@ -1544,27 +1494,26 @@ const addEmployeesFromExcel = async (req, res, next) => {
       employeeIds: existingEmployeeIds.size,
       phones: existingPhones.size
     });
-
     for (let i = 0; i < employees.length; i++) {
       const emp = employees[i];
       const row = i + 2;
       
       try {
-        // ✅ FIXED: Null-safe data sanitization
+        // Sanitize data with defaults instead of rejecting
         const sanitizedEmp = {
-          employeeId: (emp.employeeId !== null && emp.employeeId !== undefined) ? String(emp.employeeId) : `UNKNOWN-${row}`,
-          name: (emp.name !== null && emp.name !== undefined) ? String(emp.name) : 'Name Not Provided',
-          email: (emp.email !== null && emp.email !== undefined) ? String(emp.email) : '',
-          designation: (emp.designation !== null && emp.designation !== undefined) ? String(emp.designation) : 'Not Specified',
-          department: (emp.department !== null && emp.department !== undefined) ? String(emp.department) : 'General',
-          salary: (emp.salary !== null && emp.salary !== undefined) ? String(emp.salary) : '0',
-          locationName: (emp.locationName !== null && emp.locationName !== undefined) ? String(emp.locationName) : '',
-          phone: (emp.phone !== null && emp.phone !== undefined) ? String(emp.phone) : '',
+          employeeId: emp.employeeId || `UNKNOWN-${row}`,
+          name: emp.name || 'Name Not Provided',
+          email: emp.email || '',
+          designation: emp.designation || 'Not Specified', 
+          department: emp.department || 'General',
+          salary: emp.salary || '0',
+          locationName: emp.locationName || '',
+          phone: emp.phone || '',
           joinDate: emp.joinDate || null,
-          accountNo: (emp.accountNo !== null && emp.accountNo !== undefined) ? String(emp.accountNo) : '',
-          ifscCode: (emp.ifscCode !== null && emp.ifscCode !== undefined) ? String(emp.ifscCode) : '',
-          bankName: (emp.bankName !== null && emp.bankName !== undefined) ? String(emp.bankName) : '',
-          accountHolder: (emp.accountHolder !== null && emp.accountHolder !== undefined) ? String(emp.accountHolder) : ''
+          accountNo: emp.accountNo || '',
+          ifscCode: emp.ifscCode || '',
+          bankName: emp.bankName || '',
+          accountHolder: emp.accountHolder || ''
         };
 
         // Only reject if critical fields are completely unusable
@@ -1590,61 +1539,49 @@ const addEmployeesFromExcel = async (req, res, next) => {
           sanitizedEmp.salary = parsedSalary;
         }
 
-        // ✅ FIXED: Null-safe location processing
-        let locationId;
+      // ✅ IMPROVED: Better location matching with debugging
+let locationId;
 
-        // Handle null/undefined locationName safely
-        const rawLocationName = sanitizedEmp.locationName;
-        if (rawLocationName && rawLocationName !== null && rawLocationName !== undefined && rawLocationName.trim() !== '') {
-          // Clean and normalize the location name safely
-          const cleanLocationName = String(rawLocationName).toLowerCase().trim();
-          
-          console.log(`🔍 Row ${row}: Looking for location "${cleanLocationName}"`);
-          console.log(`📍 Available locations:`, Object.keys(locationMap));
-          
-          // Try exact match first
-          locationId = locationMap[cleanLocationName];
-          
-          if (!locationId) {
-            // Try fuzzy matching for common variations
-            const availableLocations = Object.keys(locationMap);
-            const fuzzyMatch = availableLocations.find(loc => {
-              const cleanLoc = loc.toLowerCase().trim();
-              const cleanInput = cleanLocationName;
-              
-              return (
-                cleanLoc.includes(cleanInput) || 
-                cleanInput.includes(cleanLoc) ||
-                cleanLoc.replace(/\s+/g, '') === cleanInput.replace(/\s+/g, '')
-              );
-            });
-            
-            if (fuzzyMatch) {
-              locationId = locationMap[fuzzyMatch];
-              console.log(`🔧 Row ${row}: Fuzzy matched "${rawLocationName}" to "${fuzzyMatch}"`);
-            } else {
-              console.log(`❌ Row ${row}: Location "${rawLocationName}" not found`);
-              errors.push({ 
-                row, 
-                message: `Invalid location "${rawLocationName}". Available locations: ${Object.keys(locationMap).join(', ')}` 
-              });
-              continue;
-            }
-          } else {
-            console.log(`✅ Row ${row}: Found exact match for location "${rawLocationName}"`);
-          }
-        } else {
-          // Handle missing/null location
-          console.log(`❌ Row ${row}: Location is null, undefined, or empty (got: ${rawLocationName})`);
-          errors.push({ 
-            row, 
-            message: `Location is required but not provided (got: ${rawLocationName})` 
-          });
-          continue;
-        }
-
-        console.log(`📍 Row ${row}: Assigned location ID: ${locationId}`);
-
+if (sanitizedEmp.locationName) {
+  // Clean and normalize the location name
+  const cleanLocationName = sanitizedEmp.locationName.toString().toLowerCase().trim();
+  // Try exact match first
+  locationId = locationMap[cleanLocationName];
+  
+  if (!locationId) {
+    // Try fuzzy matching for common variations
+    const availableLocations = Object.keys(locationMap);
+    const fuzzyMatch = availableLocations.find(loc => {
+      const cleanLoc = loc.toLowerCase().trim();
+      const cleanInput = cleanLocationName;
+      
+      return (
+        cleanLoc.includes(cleanInput) || 
+        cleanInput.includes(cleanLoc) ||
+        cleanLoc.replace(/\s+/g, '') === cleanInput.replace(/\s+/g, '') // Remove spaces
+      );
+    });
+    
+    if (fuzzyMatch) {
+      locationId = locationMap[fuzzyMatch];
+    } else {
+      // ❌ STRICT: Reject employee with invalid location (NO MORE FALLBACK TO SAME LOCATION)
+      errors.push({ 
+        row, 
+        message: `Invalid location "${sanitizedEmp.locationName}". Available locations: ${Object.keys(locationMap).join(', ')}` 
+      });
+      continue; // Skip this employee instead of assigning wrong location
+    }
+  } else {
+  }
+} else {
+  // Handle missing location
+  errors.push({ 
+    row, 
+    message: `Location is required but not provided` 
+  });
+  continue; // Skip this employee
+}
         // Parse joinDate with proper date handling
         let parsedJoinDate;
         if (sanitizedEmp.joinDate) {
@@ -1652,6 +1589,7 @@ const addEmployeesFromExcel = async (req, res, next) => {
           
           if (!parsedJoinDate) {
             parsedJoinDate = new Date();
+          } else {
           }
         } else {
           parsedJoinDate = new Date();
@@ -1695,15 +1633,15 @@ const addEmployeesFromExcel = async (req, res, next) => {
             accountHolder: sanitizedEmp.accountHolder,
           },
           paidLeaves: {
-            allocated: proratedLeaves,
-            available: proratedLeaves,
+            allocated: proratedLeaves,    // ✅ CRITICAL FIX: Add allocated field
+            available: proratedLeaves,    // ✅ Keep available
             used: 0,
             carriedForward: 0,
           },
           documents,
           createdBy: req.user._id,
           status: "active",
-          isProratedEmployee: isProrated,
+          isProratedEmployee: isProrated, // ✅ Add prorated flag
           employmentHistory: [
             {
               startDate: parsedJoinDate,
@@ -1715,7 +1653,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
 
         validEmployees.push(validEmployee);
       } catch (err) {
-        console.log(`❌ Row ${row}: Processing error:`, err.message);
         errors.push({ row, message: err.message });
       }
     }
@@ -1738,16 +1675,9 @@ const addEmployeesFromExcel = async (req, res, next) => {
         }
       });
     }
-
     try {
       // Initialize monthly leaves before insertion
       for (const employee of validEmployees) {
-
-          if (!employee.location) {
-    console.log(`⚠️ Warning: Employee ${employee.employeeId} has no location, skipping monthly leaves initialization`);
-    continue;
-  }
-
         const tempEmployee = {
           employeeId: employee.employeeId,
           joinDate: employee.joinDate,
@@ -1760,7 +1690,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
           employee.monthlyLeaves = tempEmployee.monthlyLeaves;
         }
       }
-
       const insertResult = await Employee.insertMany(validEmployees, { 
         ordered: false,
         rawResult: true 
@@ -1790,7 +1719,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
       });
 
     } catch (insertError) {
-      console.log(`❌ Failed to initialize monthly leaves for ${employee.employeeId}:`, initError.message);
       console.log('❌ Database insertion had errors:', {
         name: insertError.name,
         code: insertError.code,
@@ -1801,7 +1729,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
       if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
         const insertedCount = insertError.result?.insertedCount || 0;
         const writeErrors = insertError.writeErrors || [];
-        
         writeErrors.forEach((err, index) => {
           console.log(`Error ${index + 1}:`, {
             index: err.index,
@@ -1846,9 +1773,6 @@ const addEmployeesFromExcel = async (req, res, next) => {
     }
 
   } catch (error) {
-    console.log('❌ Overall function error:', error);
-    console.log('❌ Error stack:', error.stack);
-    
     if (error instanceof AppError) {
       return res.status(error.statusCode).json({
         message: error.message,
@@ -1858,12 +1782,10 @@ const addEmployeesFromExcel = async (req, res, next) => {
     
     res.status(500).json({ 
       message: "Server error during Excel processing", 
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: error.message 
     });
   }
 };
-
 
 
 
