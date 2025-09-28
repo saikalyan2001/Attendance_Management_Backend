@@ -5,7 +5,7 @@ import Location from "../../models/Location.js";
 import Settings from "../../models/Settings.js";
 import { DateTime } from "luxon";
 import { getWorkingDaysForLocation, getHolidaysForLocation, calculateWorkingDaysForMonth } from './settingsController.js';
-import { shouldCountForSalary } from "../../utils/workingDayValidator.js";
+import { isWorkingDay, shouldCountForSalary } from "../../utils/workingDayValidator.js";
 
 const getDaysInMonth = (year, month) => {
   return new Date(year, month, 0).getDate();
@@ -305,149 +305,192 @@ export const getSalaryReport = async (req, res) => {
       .select("employee status date presenceDays")
       .lean();
 
-    
-
-    const salaryReport = await Promise.all(
-      employees.map(async (emp) => {
-        const empAttendance = attendance.filter(
-          (att) => att.employee?._id.toString() === emp._id.toString()
-        );
-
-        // Get location-specific working days for the SPECIFIC month/year
-        const workingDaysForCalculation = getWorkingDaysForLocation(
-          settings, 
-          emp.location._id, 
-          reportYear, 
-          reportMonth
-        );
-        
-        // Get holidays for this location (for reference/reporting only)
-        const holidaysInMonth = getHolidaysForLocation(settings, emp.location._id, reportYear, reportMonth);
-        
-        
-        
-        
-        
-
-        // Filter attendance to only count working days for salary (for reporting purposes)
-        let salaryEligibleAttendance = 0;
-        let totalAttendanceRecords = 0;
-        
-        for (const attendanceRecord of empAttendance) {
-          totalAttendanceRecords++;
-          
-          // Check if this attendance should count for salary
-          if (shouldCountForSalary(attendanceRecord, settings, emp.location._id)) {
-            salaryEligibleAttendance += (attendanceRecord.presenceDays || 0);
-          } else {
-            
-          }
-        }
-        
-        // Get location-specific paid leave allocation
-        const PAID_LEAVE_LIMIT = getLocationSpecificLeaveAllocation(settings, emp.location._id);
-
-        // Calculate attendance breakdown (for reporting only)
-        const presentDays = empAttendance.filter((att) => att.status === "present").length;
-        const halfDays = empAttendance.filter((att) => att.status === "half-day").length;
-        const absentDays = empAttendance.filter((att) => att.status === "absent").length;
-        const leaveDays = empAttendance.filter((att) => att.status === "leave").length;
-        const exceptionDays = empAttendance.filter((att) => att.isException).length;
-
-        // Find advance for the report month
-        const advanceEntry = emp.advances.find(
-          (adv) => adv.year === reportYear && adv.month === reportMonth
-        );
-        const advance = advanceEntry ? advanceEntry.amount : 0;
-
-        // ✅ CORRECTED: Pro-rated salary calculation
-
-      // ✅ CORRECTED: Half-day policy implementation
-const grossSalary = emp.salary;
-const dailySalaryRate = grossSalary / workingDaysForCalculation;
-
-// Get configurable half-day rate from settings
-const halfDayRate = settings?.halfDayDeduction || 0.5;
-
-// Calculate half-day components separately
-const halfDayPresenceCredit = halfDays * halfDayRate; // Always credited
-const halfDayAbsentPortion = halfDays * halfDayRate; // Needs paid leave coverage
-
-// Calculate total leave usage (full leaves + half-day absent portion)
-const totalLeaveNeeded = leaveDays + halfDayAbsentPortion;
-
-// Get employee's total available leaves (including carryforward)
-const monthlyLeave = emp.monthlyLeaves.find(
-  (ml) => ml.year === reportYear && ml.month === reportMonth
-);
-
-let totalAvailableLeaves;
-if (monthlyLeave) {
-  totalAvailableLeaves = (monthlyLeave.allocated || 0) + (monthlyLeave.carriedForward || 0);
-} else {
-  totalAvailableLeaves = getLocationSpecificLeaveAllocation(settings, emp.location._id);
-}
-
-// Calculate paid leave usage and unpaid portion
-const paidLeaveUsed = Math.min(totalLeaveNeeded, totalAvailableLeaves);
-const unpaidLeaveDays = Math.max(0, totalLeaveNeeded - totalAvailableLeaves);
-        const unpaidLeaveDeduction = unpaidLeaveDays * dailySalaryRate;
-
-
-// ✅ SALARY CALCULATION: Present + Half-day presence + Paid leave coverage
-const salaryEligibleDaysForCalculation = presentDays + halfDayPresenceCredit + paidLeaveUsed;
-
-// Final net salary
-const netSalary = Math.max((salaryEligibleDaysForCalculation * dailySalaryRate) - advance, 0);
-
-
-
-       
-        return {
-          employee: { _id: emp._id, name: emp.name, employeeId: emp.employeeId },
-          location: emp.location,
-          presentDays,
-          halfDays,
-          absentDays,
-          leaveDays,
-          exceptionDays,
-          paidLeaveUsed: parseFloat(paidLeaveUsed.toFixed(2)),
-          unpaidLeaveDays: parseFloat(unpaidLeaveDays.toFixed(2)), // ✅ NEW: Track unpaid leaves
-          unpaidLeaveDeduction: parseFloat(unpaidLeaveDeduction.toFixed(2)), // ✅ NEW: Track deduction
-          salaryEligibleDays: parseFloat(salaryEligibleAttendance.toFixed(2)),
-          totalAttendanceRecords,
-          grossSalary: parseFloat(grossSalary.toFixed(2)),
-          netSalary: parseFloat(netSalary.toFixed(2)),
-          advance: parseFloat(advance.toFixed(2)),
-          totalSalary: parseFloat(netSalary.toFixed(2)),
-          dailySalaryRate: parseFloat(dailySalaryRate.toFixed(2)),
-          halfDayRate: parseFloat(halfDayRate.toFixed(2)),
-          workingDaysForCalculation: workingDaysForCalculation,
-          holidaysInMonth: holidaysInMonth.length,
-          holidayNames: holidaysInMonth.map(h => h.name).join(', ') || 'None',
-          locationAllocation: parseFloat(PAID_LEAVE_LIMIT.toFixed(2)),
-          salaryPolicy: "Paid leaves do NOT reduce salary", // ✅ Updated policy description
-        };
-      })
+  const salaryReport = await Promise.all(
+  employees.map(async (emp) => {
+    const empAttendance = attendance.filter(
+      (att) => att.employee?._id.toString() === emp._id.toString()
     );
 
-    // Enhanced summary with corrected calculations
+    // Get location-specific working days for the SPECIFIC month/year
+    const workingDaysForCalculation = getWorkingDaysForLocation(
+      settings, 
+      emp.location._id, 
+      reportYear, 
+      reportMonth
+    );
+    
+    // ✅ NEW: Get holidays for this location and calculate paid holiday days
+    const holidaysInMonth = getHolidaysForLocation(settings, emp.location._id, reportYear, reportMonth);
+    
+    // Calculate holiday days that fall on working days (eligible for pay)
+    let paidHolidayDays = 0;
+    const paidHolidayNames = [];
+
+    if (empAttendance.length > 0) {
+      for (const holiday of holidaysInMonth) {
+        const holidayDate = new Date(holiday.date);
+        const employeeJoinDate = new Date(emp.joinDate);
+
+        // Calculate actual working period based on attendance records
+        const latestAttendanceDate = empAttendance.reduce((latest, att) => {
+          const attDate = new Date(att.date);
+          return attDate > latest ? attDate : latest;
+        }, new Date(empAttendance[0].date));
+
+        const actualWorkingPeriodEnd = latestAttendanceDate;
+
+        if (
+          employeeJoinDate <= holidayDate &&
+          holidayDate <= actualWorkingPeriodEnd &&
+          isWorkingDay(settings, emp.location._id, holidayDate)
+        ) {
+          paidHolidayDays += 1;
+          paidHolidayNames.push(holiday.name);
+        } else if (employeeJoinDate > holidayDate) {
+        } else if (holidayDate > actualWorkingPeriodEnd) {
+        } else {
+        }
+      }
+    } else {
+      // No attendance records - exclude holiday pay
+      paidHolidayDays = 0;
+      paidHolidayNames.push('None');
+    }
+
+
+    // Filter attendance to only count working days for salary (for reporting purposes)
+    let salaryEligibleAttendance = 0;
+    let totalAttendanceRecords = 0;
+    
+    for (const attendanceRecord of empAttendance) {
+      totalAttendanceRecords++;
+      
+      // Check if this attendance should count for salary
+      if (shouldCountForSalary(attendanceRecord, settings, emp.location._id)) {
+        salaryEligibleAttendance += (attendanceRecord.presenceDays || 0);
+      }
+    }
+    
+    // Get location-specific paid leave allocation
+    const PAID_LEAVE_LIMIT = getLocationSpecificLeaveAllocation(settings, emp.location._id);
+
+
+    // Calculate attendance breakdown (for reporting only)
+    const presentDays = empAttendance.filter((att) => att.status === "present").length;
+    const halfDays = empAttendance.filter((att) => att.status === "half-day").length;
+    const absentDays = empAttendance.filter((att) => att.status === "absent").length;
+    const leaveDays = empAttendance.filter((att) => att.status === "leave").length;
+    const exceptionDays = empAttendance.filter((att) => att.isException).length;
+
+
+    // Find advance for the report month
+    const advanceEntry = emp.advances.find(
+      (adv) => adv.year === reportYear && adv.month === reportMonth
+    );
+    const advance = advanceEntry ? advanceEntry.amount : 0;
+
+
+    // ✅ SALARY CALCULATION WITH HOLIDAY PAY
+    const grossSalary = emp.salary;
+    const dailySalaryRate = grossSalary / workingDaysForCalculation;
+
+
+    // Get configurable half-day rate from settings
+    const halfDayRate = settings?.halfDayDeduction || 0.5;
+
+
+    // Calculate half-day components separately
+    const halfDayPresenceCredit = halfDays * halfDayRate; // Always credited
+    const halfDayAbsentPortion = halfDays * halfDayRate; // Needs paid leave coverage
+
+
+    // Calculate total leave usage (full leaves + half-day absent portion)
+    const totalLeaveNeeded = leaveDays + halfDayAbsentPortion;
+
+
+    // Get employee's total available leaves (including carryforward)
+    const monthlyLeave = emp.monthlyLeaves.find(
+      (ml) => ml.year === reportYear && ml.month === reportMonth
+    );
+
+
+    let totalAvailableLeaves;
+    if (monthlyLeave) {
+      totalAvailableLeaves = (monthlyLeave.allocated || 0) + (monthlyLeave.carriedForward || 0);
+    } else {
+      totalAvailableLeaves = getLocationSpecificLeaveAllocation(settings, emp.location._id);
+    }
+
+
+    // Calculate paid leave usage and unpaid portion
+    const paidLeaveUsed = Math.min(totalLeaveNeeded, totalAvailableLeaves);
+    const unpaidLeaveDays = Math.max(0, totalLeaveNeeded - totalAvailableLeaves);
+    const unpaidLeaveDeduction = unpaidLeaveDays * dailySalaryRate;
+
+
+    // ✅ UPDATED: SALARY CALCULATION INCLUDING HOLIDAY PAY
+    // Present + Half-day presence + Paid leave coverage + Paid holidays
+    const salaryEligibleDaysForCalculation = presentDays + halfDayPresenceCredit + paidLeaveUsed + paidHolidayDays;
+
+
+    // Final net salary (now includes holiday pay)
+    const netSalary = Math.max((salaryEligibleDaysForCalculation * dailySalaryRate) - advance, 0);
+
+
+    return {
+      employee: { _id: emp._id, name: emp.name, employeeId: emp.employeeId },
+      location: emp.location,
+      presentDays,
+      halfDays,
+      absentDays,
+      leaveDays,
+      exceptionDays,
+      paidLeaveUsed: parseFloat(paidLeaveUsed.toFixed(2)),
+      unpaidLeaveDays: parseFloat(unpaidLeaveDays.toFixed(2)),
+      unpaidLeaveDeduction: parseFloat(unpaidLeaveDeduction.toFixed(2)),
+      // ✅ NEW: Holiday pay fields
+      paidHolidayDays: parseFloat(paidHolidayDays.toFixed(2)),
+      paidHolidayNames: paidHolidayNames.join(', ') || 'None',
+      salaryEligibleDays: parseFloat(salaryEligibleAttendance.toFixed(2)),
+      // ✅ UPDATED: Now includes holiday pay in calculation
+      salaryEligibleDaysForCalculation: parseFloat(salaryEligibleDaysForCalculation.toFixed(2)),
+      totalAttendanceRecords,
+      grossSalary: parseFloat(grossSalary.toFixed(2)),
+      netSalary: parseFloat(netSalary.toFixed(2)),
+      advance: parseFloat(advance.toFixed(2)),
+      totalSalary: parseFloat(netSalary.toFixed(2)),
+      dailySalaryRate: parseFloat(dailySalaryRate.toFixed(2)),
+      halfDayRate: parseFloat(halfDayRate.toFixed(2)),
+      workingDaysForCalculation: workingDaysForCalculation,
+      holidaysInMonth: holidaysInMonth.length,
+      holidayNames: holidaysInMonth.map(h => h.name).join(', ') || 'None',
+      locationAllocation: parseFloat(PAID_LEAVE_LIMIT.toFixed(2)),
+      // ✅ UPDATED: Policy description now includes holiday pay
+      salaryPolicy: "Paid leaves + Holidays do NOT reduce salary (both are PAID)",
+    };
+  })
+);
+
+
+    // ✅ UPDATED: Enhanced summary with holiday pay totals
     const summary = {
       totalPresentDays: salaryReport.reduce((sum, emp) => sum + emp.presentDays, 0),
       totalHalfDays: salaryReport.reduce((sum, emp) => sum + emp.halfDays, 0),
       totalAbsentDays: salaryReport.reduce((sum, emp) => sum + emp.absentDays, 0),
       totalLeaveDays: salaryReport.reduce((sum, emp) => sum + emp.leaveDays, 0),
       totalPaidLeaveUsed: parseFloat(salaryReport.reduce((sum, emp) => sum + emp.paidLeaveUsed, 0).toFixed(2)),
-      totalUnpaidDays: parseFloat(salaryReport.reduce((sum, emp) => sum + (emp.unpaidLeaveDays || 0), 0).toFixed(2)), // ✅ NEW
-      totalUnpaidDeduction: parseFloat(salaryReport.reduce((sum, emp) => sum + (emp.unpaidLeaveDeduction || 0), 0).toFixed(2)), // ✅ NEW
+      totalUnpaidDays: parseFloat(salaryReport.reduce((sum, emp) => sum + (emp.unpaidLeaveDays || 0), 0).toFixed(2)),
+      totalUnpaidDeduction: parseFloat(salaryReport.reduce((sum, emp) => sum + (emp.unpaidLeaveDeduction || 0), 0).toFixed(2)),
+      // ✅ NEW: Holiday pay summary
+      totalPaidHolidayDays: parseFloat(salaryReport.reduce((sum, emp) => sum + (emp.paidHolidayDays || 0), 0).toFixed(2)),
       totalGrossSalary: parseFloat(salaryReport.reduce((sum, emp) => sum + emp.grossSalary, 0).toFixed(2)),
       totalNetSalary: parseFloat(salaryReport.reduce((sum, emp) => sum + emp.netSalary, 0).toFixed(2)),
       totalAdvance: parseFloat(salaryReport.reduce((sum, emp) => sum + emp.advance, 0).toFixed(2)),
       totalSalary: parseFloat(salaryReport.reduce((sum, emp) => sum + emp.totalSalary, 0).toFixed(2)),
-      totalHolidays: parseFloat(salaryReport.reduce((sum, emp) => sum + emp.holidaysInMonth, 0).toFixed(2)),
+      totalHolidays: salaryReport.reduce((sum, emp) => sum + emp.holidaysInMonth, 0),
+      // ✅ NEW: Summary policy
+      summaryPolicy: "All employees receive full pay for holidays that fall on working days"
     };
-
-    
 
     res.json({
       employees: salaryReport,
@@ -460,7 +503,6 @@ const netSalary = Math.max((salaryEligibleDaysForCalculation * dailySalaryRate) 
       },
     });
   } catch (error) {
-    
     res.status(500).json({ message: "Server error while fetching salary report" });
   }
 };
