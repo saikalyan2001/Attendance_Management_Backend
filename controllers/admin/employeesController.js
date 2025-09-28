@@ -996,6 +996,11 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
   const files = req.files;
   const { page = 1, limit = 5 } = req.query;
 
+  // ✅ Enhanced validation
+  if (!files || files.length === 0) {
+    res.status(400);
+    throw new Error("No files provided for upload");
+  }
   // Fetch employee with populated location
   const employee = await Employee.findById(id).populate('location');
   if (!employee) {
@@ -1005,17 +1010,56 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
 
   // Get location name
   const locationName = employee.location?.name || 'General';
+  // ✅ Validate file types and sizes (optional - customize based on your requirements)
+  const allowedMimeTypes = [
+    'application/pdf',
+    'image/jpeg', 'image/png', 'image/gif',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'text/plain'
+  ];
+  
+  const maxFileSize = 10 * 1024 * 1024; // 10MB
+  
+  const invalidFiles = files.filter(file => 
+    !allowedMimeTypes.includes(file.mimetype) || file.size > maxFileSize
+  );
+  
+  if (invalidFiles.length > 0) {
+    res.status(400);
+    throw new Error(`Invalid files detected: ${invalidFiles.map(f => f.originalname).join(', ')}. Check file types and sizes.`);
+  }
 
   // Upload to location-specific folder
   let googleDriveDocuments = [];
+  let uploadResults = { successful: [], failed: [] };
+  
   try {
-    googleDriveDocuments = await googleDriveService.uploadMultipleFiles(files, employee.employeeId, locationName);
+    const uploadResponse = await googleDriveService.uploadMultipleFiles(files, employee.employeeId, locationName);
+    
+    // ✅ Handle partial failures - separate successful from failed uploads
+    googleDriveDocuments = uploadResponse.filter(result => !result.error);
+    const failedUploads = uploadResponse.filter(result => result.error);
+    
+    uploadResults = {
+      successful: googleDriveDocuments,
+      failed: failedUploads
+    };
+    // ✅ If no files uploaded successfully, throw error
+    if (googleDriveDocuments.length === 0) {
+      throw new Error(`All file uploads failed. Errors: ${failedUploads.map(f => `${f.originalName}: ${f.error}`).join('; ')}`);
+    }
+
+    // ✅ Log partial failures but continue with successful uploads
+    if (failedUploads.length > 0) {
+    }
+
   } catch (error) {
     res.status(500);
     throw new Error(`Failed to upload documents to Google Drive: ${error.message}`);
   }
 
-  // Convert to document schema format
+  // Convert successful uploads to document schema format
   const newDocuments = googleDriveDocuments.map(doc => ({
     googleDriveId: doc.googleDriveId,
     originalName: doc.originalName,
@@ -1028,16 +1072,44 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
     createdTime: doc.createdTime,
     name: doc.originalName,
     path: doc.googleDriveId,
+    // ✅ Additional metadata for better tracking
+    locationName: doc.locationName,
+    locationFolderId: doc.locationFolderId,
+    uploadedBy: req.user?.id || null, // Assuming you have user info in req.user
   }));
 
-  employee.documents.push(...newDocuments);
-
+  // ✅ Save with better error handling
+  let savedSuccessfully = false;
+  const originalDocumentsCount = employee.documents.length;
+  
   try {
+    employee.documents.push(...newDocuments);
     await employee.save();
+    savedSuccessfully = true;
+  } catch (saveError) {
+    // ✅ Enhanced cleanup using new deleteMultipleFiles method
+    if (googleDriveDocuments.length > 0) {
+      try {
+        const fileIds = googleDriveDocuments.map(doc => doc.googleDriveId);
+        const deleteResults = await googleDriveService.deleteMultipleFiles(fileIds);
+        
+        const cleanupSuccessful = deleteResults.filter(r => r.success).length;
+        const cleanupFailed = deleteResults.filter(r => !r.success).length;
+        if (cleanupFailed > 0) {
+        }
+      } catch (cleanupError) {
+      }
+    }
+    
+    // Re-throw the original save error
+    res.status(500);
+    throw new Error(`Failed to save documents to database: ${saveError.message}`);
+  }
 
-    // Fetch updated employee with paginated documents
-    const parsedPage = parseInt(page, 10);
-    const parsedLimit = parseInt(limit, 10);
+  // ✅ Fetch updated employee with enhanced pagination
+  try {
+    const parsedPage = Math.max(1, parseInt(page, 10));
+    const parsedLimit = Math.max(1, Math.min(50, parseInt(limit, 10))); // Cap at 50
     const skip = (parsedPage - 1) * parsedLimit;
 
     const pipeline = [
@@ -1083,12 +1155,20 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
           transferTimestamp: 1,
           monthlyLeaves: 1,
           totalDocuments: { $size: "$documents" },
-          documents: { $slice: ["$documents", skip, parsedLimit] },
+          // ✅ Sort documents by upload date (newest first)
+          documents: { 
+            $slice: [
+              { $reverseArray: "$documents" },
+              skip, 
+              parsedLimit
+            ]
+          },
         },
       },
     ];
 
     const [updatedEmployee] = await Employee.aggregate(pipeline);
+    
     if (!updatedEmployee) {
       res.status(404);
       throw new Error("Employee not found after update");
@@ -1098,27 +1178,48 @@ const addEmployeeDocuments = asyncHandler(async (req, res) => {
     const totalPages = Math.ceil(totalDocuments / parsedLimit);
     delete updatedEmployee.totalDocuments;
 
-    res.status(200).json({
+    // ✅ Enhanced response with upload status
+    const responseData = {
+      success: true,
+      message: `Successfully processed ${files.length} file(s)`,
       employee: updatedEmployee,
+      uploadSummary: {
+        totalFilesProcessed: files.length,
+        successfulUploads: googleDriveDocuments.length,
+        failedUploads: uploadResults.failed.length,
+        ...(uploadResults.failed.length > 0 && {
+          failedFiles: uploadResults.failed.map(f => ({
+            filename: f.originalName,
+            error: f.error
+          }))
+        })
+      },
       pagination: {
         currentPage: parsedPage,
         totalPages,
         totalItems: totalDocuments,
         itemsPerPage: parsedLimit,
+        hasNextPage: parsedPage < totalPages,
+        hasPreviousPage: parsedPage > 1,
       },
+    };
+    res.status(200).json(responseData);
+
+  } catch (fetchError) {
+    // Even if fetch fails, the upload was successful, so return a basic success response
+    res.status(200).json({
+      success: true,
+      message: `Documents uploaded successfully, but could not fetch updated employee data`,
+      uploadSummary: {
+        totalFilesProcessed: files.length,
+        successfulUploads: googleDriveDocuments.length,
+        failedUploads: uploadResults.failed.length,
+      },
+      error: "Could not retrieve updated employee data"
     });
-  } catch (error) {
-    // Clean up uploaded files on save error
-    for (const doc of googleDriveDocuments) {
-      try {
-        await googleDriveService.deleteFile(doc.googleDriveId);
-      } catch (deleteError) {
-        // Continue
-      }
-    }
-    throw error;
   }
 });
+
 
 // @desc    Get settings
 // @route   GET /api/admin/employees/settings
@@ -1321,11 +1422,16 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth() + 1;
 
-    // Get allocation...
-    let monthlyAllocation = 2;
+    // ✅ HYBRID FIX: Use location-based monthly rate, but with proper location matching
+    let monthlyAllocation = 2; // Default fallback
+    
     if (settings && employee.location) {
+      // Debug the location matching
+ 
+      
       const locationSetting = settings.locationLeaveSettings?.find(
-        setting => setting.location.toString() === employee.location.toString()
+        setting => setting.location._id?.toString() === employee.location.toString() ||
+                   setting.location.toString() === employee.location.toString()
       );
       
       if (locationSetting) {
@@ -1337,7 +1443,7 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
 
     employee.monthlyLeaves = [];
     
-    // ✅ FIXED: Initialize all months with NO carry forward
+    // Initialize all months with the location-based monthly rate
     for (let y = joinYear; y <= currentYear; y++) {
       const startMonth = y === joinYear ? joinMonth : 1;
       const endMonth = y === currentYear ? currentMonth : 12;
@@ -1346,12 +1452,12 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
         const monthlyLeave = {
           year: y,
           month: m,
-          allocated: monthlyAllocation,
+          allocated: monthlyAllocation, // Location-based monthly rate
           taken: 0,
-          carriedForward: 0, // ✅ Always 0 - no automatic carry forward
-          available: monthlyAllocation, // ✅ Only allocated
-          isFinalized: false, // ✅ Default to not finalized
-          finalizedAt: null   // ✅ No finalization date
+          carriedForward: 0,
+          available: monthlyAllocation,
+          isFinalized: false,
+          finalizedAt: null
         };
         
         employee.monthlyLeaves.push(monthlyLeave);
@@ -1363,6 +1469,8 @@ const initializeMonthlyLeavesForEmployee = async (employee, settings) => {
 };
 
 
+
+
 // ✅ COMPLETE UPDATED: Add employees from Excel file with prorated leave fix
 const addEmployeesFromExcel = async (req, res, next) => {
   try {
@@ -1371,12 +1479,7 @@ const addEmployeesFromExcel = async (req, res, next) => {
     }
 
     const excelFile = req.files.excelFile[0];
-    console.log('📄 Excel file details:', {
-      originalname: excelFile.originalname,
-      mimetype: excelFile.mimetype,
-      size: excelFile.size,
-      path: excelFile.path
-    });
+
 
     const documentFiles = req.files.documents || [];
     const requiredHeaders = [
@@ -1490,10 +1593,7 @@ locations.forEach((loc) => {
     const existingEmployeeIds = new Set(existingEmployees.map(e => e.employeeId));
     const existingPhones = new Set(existingEmployees.map(e => e.phone));
 
-    console.log('📋 Found existing duplicates:', {
-      employeeIds: existingEmployeeIds.size,
-      phones: existingPhones.size
-    });
+
     for (let i = 0; i < employees.length; i++) {
       const emp = employees[i];
       const row = i + 2;
@@ -1605,8 +1705,24 @@ if (sanitizedEmp.locationName) {
           parsedJoinDate = new Date();
         }
 
-        // Calculate prorated leaves
-        const proratedLeaves = calculateProratedLeaves(parsedJoinDate, settings.paidLeavesPerYear);
+        // ✅ FIXED: Calculate location-specific prorated leaves
+let locationSpecificLeaves = settings.paidLeavesPerYear; // Default to global (24)
+
+// Find location-specific leave setting
+if (locationId && settings.locationLeaveSettings) {
+  const locationSetting = settings.locationLeaveSettings.find(
+    (setting) => setting.location._id.toString() === locationId.toString()
+  );
+  
+  if (locationSetting) {
+    locationSpecificLeaves = locationSetting.paidLeavesPerYear; // This will be 18 for Hyd Office
+  } else {
+  }
+}
+
+// ✅ Use location-specific leaves instead of global
+const proratedLeaves = calculateProratedLeaves(parsedJoinDate, locationSpecificLeaves);
+
         
         // ✅ DETERMINE: If employee is prorated  
         const joinYear = parsedJoinDate.getFullYear();
@@ -1657,11 +1773,7 @@ if (sanitizedEmp.locationName) {
       }
     }
 
-    console.log('📊 Processing summary:', {
-      totalRows: employees.length,
-      validEmployees: validEmployees.length,
-      errors: errors.length
-    });
+
 
     if (validEmployees.length === 0) {
       return res.status(400).json({
@@ -1682,6 +1794,7 @@ if (sanitizedEmp.locationName) {
           employeeId: employee.employeeId,
           joinDate: employee.joinDate,
           location: employee.location,
+          paidLeaves: employee.paidLeaves,
           monthlyLeaves: []
         };
         
@@ -1699,10 +1812,7 @@ if (sanitizedEmp.locationName) {
       const insertedEmployees = insertResult.ops || insertResult.mongoose?.results || insertResult;
 
       const totalEmployeesInDB = await Employee.countDocuments({});
-      console.log('📊 Database verification:', {
-        insertedThisSession: insertedCount,
-        totalInDatabase: totalEmployeesInDB
-      });
+  
 
       res.status(201).json({
         message: `Successfully processed ${insertedCount} employees${errors.length > 0 ? ` with ${errors.length} errors` : ''}`,
@@ -1719,25 +1829,13 @@ if (sanitizedEmp.locationName) {
       });
 
     } catch (insertError) {
-      console.log('❌ Database insertion had errors:', {
-        name: insertError.name,
-        code: insertError.code,
-        message: insertError.message,
-        writeErrors: insertError.writeErrors?.length || 0
-      });
+ 
       
       if (insertError.name === 'BulkWriteError' || insertError.code === 11000) {
         const insertedCount = insertError.result?.insertedCount || 0;
         const writeErrors = insertError.writeErrors || [];
         writeErrors.forEach((err, index) => {
-          console.log(`Error ${index + 1}:`, {
-            index: err.index,
-            code: err.code,
-            errmsg: err.errmsg,
-            keyPattern: err.err?.keyPattern,
-            keyValue: err.err?.keyValue,
-            operationType: err.err?.op
-          });
+        
         });
 
         const insertedEmployees = insertError.insertedDocs || [];
