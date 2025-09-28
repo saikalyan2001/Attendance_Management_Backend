@@ -10,7 +10,8 @@ import {
   exportAttendance,
   undoMarkAttendance,
   getLocationWorkingDayPolicy, // ✅ ADD
-  validateAttendanceDateEndpoint, // ✅ ADD
+  validateAttendanceDateEndpoint,
+  processCarryForwardUpdates, // ✅ ADD
 } from '../../controllers/admin/attendanceController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 
@@ -28,9 +29,16 @@ router.post('/attendance/requests', requestAttendanceEdit);
 router.put('/attendance/requests/:id', handleAttendanceRequest);
 router.get('/attendance/export', exportAttendance);
 router.post('/attendance/undo', undoMarkAttendance);
-
-// ✅ ADD: Working day validation endpoints
 router.get('/attendance/working-day-policy', getLocationWorkingDayPolicy);
 router.get('/attendance/validate-date', validateAttendanceDateEndpoint);
+router.post('/attendance/carry-forward-update', async (req, res) => {
+  try {
+    await processCarryForwardUpdates();
+    res.status(200).json({ success: true, message: 'Carry forward update completed successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Failed to update carry forwards' });
+  }
+});
+
 
 export default router;
