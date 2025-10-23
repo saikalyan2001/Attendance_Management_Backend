@@ -154,7 +154,7 @@ export const getEmployees = async (req, res) => {
       const response = {
         employees: updatedEmployees,
         pagination: {
-          total,
+          totalItems: total,
           page: pageNum,
           limit: limitNum,
           totalPages: Math.ceil(total / limitNum),
