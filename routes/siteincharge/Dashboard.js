@@ -1,12 +1,9 @@
 import express from 'express';
-import { getDashboardData } from '../../controllers/siteincharge/dashboardController.js';
+// Use same controller as admin/superadmin for consistency:
+import { fetchSuperAdminDashboard } from '../../controllers/superadmin/superAdminController.js';
 import { protect, restrictTo } from '../../middleware/authMiddleware.js';
 
 const router = express.Router();
-
-router.use(protect);
-router.use(restrictTo('siteincharge'));
-
-router.get('/dashboard', getDashboardData);
+router.get('/dashboard', protect, restrictTo('siteincharge'), fetchSuperAdminDashboard);
 
 export default router;
