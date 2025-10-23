@@ -1741,8 +1741,6 @@ const hasAttendanceInMonth = async (employeeId, year, month) => {
 };
 
 
-// Keep other existing helper functions...
-
 // 🚀 MAIN FUNCTION: Extended timeout bulk attendance processing
 export const bulkMarkAttendance = async (req, res) => {
   const t0 = Date.now();
@@ -2821,18 +2819,30 @@ export const getAttendance = async (req, res) => {
 
     const parsedPage = parseInt(page, 10);
     const parsedLimit = parseInt(limit, 10);
+    
     if (isNaN(parsedPage) || parsedPage < 1) {
       return res.status(400).json({ message: 'Invalid page number' });
     }
-    if (isNaN(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
-      return res.status(400).json({ message: 'Invalid limit value (must be between 1 and 100)' });
+    
+    // ✅ UPDATED: Allow larger limits for downloads (up to 10000)
+    if (isNaN(parsedLimit) || parsedLimit < 1 || parsedLimit > 10000) {
+      return res.status(400).json({ message: 'Invalid limit value (must be between 1 and 10000)' });
     }
 
-    // ✅ UPDATED: For monthly attendance, paginate EMPLOYEES not attendance records
+    // ✅ FIXED: For monthly attendance, fetch employees based on ATTENDANCE location, not current employee location
     if (month && year && !employeeId) {
-      // Build employee query first
-      const employeeMatch = { isDeleted: false };
+      const monthNum = parseInt(month);
+      const yearNum = parseInt(year);
+      const startStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-01T00:00:00+05:30`;
+      const endStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-${new Date(yearNum, monthNum, 0).getDate()}T23:59:59+05:30`;
       
+      // ✅ STEP 1: Build attendance query based on location filter
+      let attendanceMatchForEmployees = {
+        date: { $gte: startStr, $lte: endStr },
+        isDeleted: false,
+      };
+
+      // ✅ CRITICAL: Filter by attendance.location (where attendance was marked), not employee.location (current location)
       if (location && location !== 'all') {
         if (!mongoose.Types.ObjectId.isValid(location)) {
           return res.status(400).json({ message: 'Invalid location ID format' });
@@ -2841,15 +2851,43 @@ export const getAttendance = async (req, res) => {
         if (!locationExists) {
           return res.status(400).json({ message: 'Location not found' });
         }
-        employeeMatch.location = new mongoose.Types.ObjectId(location);
+        attendanceMatchForEmployees.location = new mongoose.Types.ObjectId(location);
       }
+
+      if (status && status !== 'all') {
+        if (!['present', 'absent', 'leave', 'half-day'].includes(status)) {
+          return res.status(400).json({ message: 'Invalid status' });
+        }
+        attendanceMatchForEmployees.status = status;
+      }
+
+      // ✅ STEP 2: Get unique employee IDs from attendance records (this includes transferred employees)
+      const uniqueEmployeeIds = await Attendance.distinct('employee', attendanceMatchForEmployees);
+
+      if (uniqueEmployeeIds.length === 0) {
+        return res.status(200).json({
+          attendance: [],
+          pagination: {
+            currentPage: parsedPage,
+            totalPages: 0,
+            totalItems: 0,
+            itemsPerPage: parsedLimit,
+          },
+        });
+      }
+
+      // ✅ STEP 3: Build employee query (no location filter on employees - we get them based on attendance)
+      const employeeMatch = { 
+        _id: { $in: uniqueEmployeeIds },
+        isDeleted: false 
+      };
 
       // Get total employee count for pagination
       const totalEmployees = await Employee.countDocuments(employeeMatch);
       const totalPages = Math.ceil(totalEmployees / parsedLimit);
       const skip = (parsedPage - 1) * parsedLimit;
 
-      // Get paginated employees
+      // ✅ STEP 4: Get paginated employees (sorted by employeeId)
       const employees = await Employee.find(employeeMatch)
         .populate('location', 'name')
         .sort({ employeeId: 1 })
@@ -2871,26 +2909,19 @@ export const getAttendance = async (req, res) => {
 
       const employeeIds = employees.map(emp => emp._id);
 
-      // Get ALL attendance records for these employees for the entire month
-      const monthNum = parseInt(month);
-      const yearNum = parseInt(year);
-      const startStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-01T00:00:00+05:30`;
-      const endStr = `${yearNum}-${monthNum.toString().padStart(2, '0')}-${new Date(yearNum, monthNum, 0).getDate()}T23:59:59+05:30`;
-      
+      // ✅ STEP 5: Get ALL attendance records for these employees for the entire month
       let attendanceMatch = {
         employee: { $in: employeeIds },
         date: { $gte: startStr, $lte: endStr },
         isDeleted: false,
       };
 
+      // ✅ Apply location and status filters to attendance records
       if (location && location !== 'all') {
         attendanceMatch.location = new mongoose.Types.ObjectId(location);
       }
 
       if (status && status !== 'all') {
-        if (!['present', 'absent', 'leave', 'half-day'].includes(status)) {
-          return res.status(400).json({ message: 'Invalid status' });
-        }
         attendanceMatch.status = status;
       }
 
@@ -2899,39 +2930,61 @@ export const getAttendance = async (req, res) => {
         .populate('location', 'name')
         .lean();
 
-      // ✅ FIRST: Correct monthly leaves for each employee
-      for (const employee of employees) {
-        const fullEmployee = await Employee.findById(employee._id);
-        if (fullEmployee) {
-          await correctMonthlyLeaves(fullEmployee, yearNum, monthNum, null);
+      // ✅ OPTIMIZATION: Skip corrections for large downloads (limit > 100)
+      // Corrections are expensive and not critical for export data
+      if (parsedLimit <= 100) {
+        // ✅ STEP 6: Correct monthly leaves for each employee (only for small requests)
+        for (const employee of employees) {
+          const fullEmployee = await Employee.findById(employee._id);
+          if (fullEmployee) {
+            await correctMonthlyLeaves(fullEmployee, yearNum, monthNum, null);
+          }
         }
+
+        // ✅ STEP 7: Fetch FRESH corrected data after corrections
+        const correctedEmployees = await Employee.find({
+          _id: { $in: employeeIds }
+        })
+          .populate('location', 'name')
+          .sort({ employeeId: 1 })
+          .lean();
+
+        // ✅ STEP 8: Structure response with CORRECTED data
+        const employeeAttendanceData = correctedEmployees.map(employee => ({
+          employee: employee,
+          attendance: attendanceRecords.filter(att => 
+            att.employee._id.toString() === employee._id.toString()
+          )
+        }));
+
+        return res.status(200).json({
+          attendance: employeeAttendanceData,
+          pagination: {
+            currentPage: parsedPage,
+            totalPages,
+            totalItems: totalEmployees,
+            itemsPerPage: parsedLimit,
+          },
+        });
+      } else {
+        // ✅ FAST PATH: For large downloads, skip corrections and use existing data
+        const employeeAttendanceData = employees.map(employee => ({
+          employee: employee,
+          attendance: attendanceRecords.filter(att => 
+            att.employee._id.toString() === employee._id.toString()
+          )
+        }));
+
+        return res.status(200).json({
+          attendance: employeeAttendanceData,
+          pagination: {
+            currentPage: parsedPage,
+            totalPages,
+            totalItems: totalEmployees,
+            itemsPerPage: parsedLimit,
+          },
+        });
       }
-
-      // ✅ CRITICAL FIX: Fetch FRESH corrected data after corrections
-      const correctedEmployees = await Employee.find({
-        _id: { $in: employeeIds }
-      })
-        .populate('location', 'name')
-        .sort({ employeeId: 1 })
-        .lean();
-
-      // ✅ Structure response with CORRECTED data
-      const employeeAttendanceData = correctedEmployees.map(employee => ({
-        employee: employee,  // ✅ Fresh data with correct paidLeaves
-        attendance: attendanceRecords.filter(att => 
-          att.employee._id.toString() === employee._id.toString()
-        )
-      }));
-
-      return res.status(200).json({
-        attendance: employeeAttendanceData, // ✅ Contains corrected prorated values
-        pagination: {
-          currentPage: parsedPage,
-          totalPages,
-          totalItems: totalEmployees,
-          itemsPerPage: parsedLimit,
-        },
-      });
     }
 
     // ✅ EXISTING: Handle single employee or other cases (unchanged)
@@ -3038,6 +3091,8 @@ export const getAttendance = async (req, res) => {
     res.status(500).json({ message: `Server error while fetching attendance: ${error.message}` });
   }
 };
+
+
 
 
 // Continue with all remaining existing functions...
