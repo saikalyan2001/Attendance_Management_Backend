@@ -6,7 +6,29 @@ import Settings from "../../models/Settings.js";
 import Location from "../../models/Location.js";
 import { initializeMonthlyLeaves } from "../../utils/leaveUtils.js";
 import { isWorkingDay, getWorkingDayPolicyInfo, shouldCountForSalary } from '../../utils/workingDayValidator.js';
+import { getHolidaysForLocation } from '../../controllers/admin/settingsController.js';
 
+// 🚀 ENHANCED: Global caches and configuration
+const calculationCache = new Map();
+const finalizationCache = new Map();
+const documentLockCache = new Map();
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
+const FINALIZATION_CACHE_DURATION = 20 * 60 * 1000; // 20 minutes
+const LOCK_TIMEOUT = 60000; // 60 seconds
+
+// 🚀 ENHANCED: Extended timeout configuration
+const EXTENDED_TIMEOUTS = {
+  transactionTimeout: 60000,       // 60 seconds for complex operations
+  queryTimeout: 45000,             // 45 seconds per query
+  connectionTimeout: 30000,        // 30 seconds connection timeout
+  socketTimeout: 65000,            // 65 seconds socket timeout
+  serverSelectionTimeout: 15000    // 15 seconds server selection
+};
+
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
 
 function userHasLocation(user, location) {
   const userLocationIds = user.locations.map((loc) =>
@@ -14,6 +36,391 @@ function userHasLocation(user, location) {
   );
   return userLocationIds.includes(location.toString());
 }
+
+function getISTDateComponents(date) {
+  const dateObj = new Date(date);
+  const month = dateObj.getMonth() + 1;
+  const year = dateObj.getFullYear();
+  return { month, year };
+}
+
+const createCacheKey = (employeeId, year, month, type) => {
+  return `${employeeId}_${year}_${month}_${type}`;
+};
+
+const createFinalizationKey = (employeeId, year, month, type) => {
+  return `${employeeId}_${year}_${month}_${type}`;
+};
+
+const releaseDocumentLock = (docId) => {
+  const lockKey = docId.toString();
+  documentLockCache.delete(lockKey);
+};
+
+const normalizeDate = (date) => {
+  const d = new Date(date);
+  return d.toISOString().split('T')[0];
+};
+
+const isEmployeeProrated = (employee, settings) => {
+  const joinDate = new Date(employee.joinDate);
+  const joinYear = joinDate.getFullYear();
+  const joinMonth = joinDate.getMonth() + 1;
+  const currentYear = new Date().getFullYear();
+  
+  const joinedMidYear = joinMonth > 1 && joinYear === currentYear;
+  const fullYearAllocation = settings?.paidLeavesPerYear || 24;
+  const currentAllocated = employee.paidLeaves?.allocated || 0;
+  const hasReducedAllocation = currentAllocated > 0 && currentAllocated < fullYearAllocation;
+  
+  return joinedMidYear || hasReducedAllocation || employee.isProratedEmployee === true;
+};
+
+function validateMonthlyLeaveConsistency(employee, targetYear, targetMonth) {
+  const joinDate = new Date(employee.joinDate);
+  const joinYear = joinDate.getFullYear();
+  const joinMonth = joinDate.getMonth() + 1;
+  
+  if (employee.monthlyLeaves) {
+    employee.monthlyLeaves.forEach((ml, index) => {
+      const isTarget = ml.year === targetYear && ml.month === targetMonth;
+    });
+  }
+  
+  const targetRecord = employee.monthlyLeaves?.find(ml => 
+    ml.year === targetYear && ml.month === targetMonth
+  );
+}
+
+const calculateProratedLeaveWithCache = (employee, year, month) => {
+  const cacheKey = createCacheKey(employee._id, year, month, 'prorated');
+  
+  const cached = calculationCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
+    return cached.result;
+  }
+  
+  const joinDate = new Date(employee.joinDate);
+  const joinYear = joinDate.getFullYear();
+  const joinMonth = joinDate.getMonth() + 1;
+  
+  const proratedData = {
+    joinMonth,
+    joinYear,
+    processYear: year,
+    joinedMidYear: joinYear === year && joinMonth > 1,
+    hasReducedAllocation: false,
+    isProratedFlag: false,
+    currentAllocated: 24,
+    fullYearAllocation: 24,
+    finalIsProrated: false
+  };
+  
+  if (joinYear === year && joinMonth > 1) {
+    const monthsWorked = 13 - joinMonth;
+    proratedData.currentAllocated = Math.floor((monthsWorked / 12) * 24);
+    proratedData.finalIsProrated = true;
+    proratedData.isProratedFlag = true;
+  }
+  
+  const result = {
+    allocated: proratedData.currentAllocated,
+    available: proratedData.currentAllocated,
+    used: 0,
+    status: proratedData.finalIsProrated ? 'PRORATED CALCULATED' : 'FULL YEAR CALCULATED'
+  };
+  
+  calculationCache.set(cacheKey, {
+    result,
+    timestamp: Date.now()
+  });
+  
+  return result;
+};
+
+const acquireDocumentLock = async (docId) => {
+  const lockKey = docId.toString();
+  const now = Date.now();
+  
+  const existingLock = documentLockCache.get(lockKey);
+  if (existingLock && (now - existingLock.timestamp) < LOCK_TIMEOUT) {
+    return new Promise((resolve) => {
+      const checkLock = () => {
+        const currentLock = documentLockCache.get(lockKey);
+        if (!currentLock || (Date.now() - currentLock.timestamp) >= LOCK_TIMEOUT) {
+          documentLockCache.set(lockKey, { timestamp: Date.now() });
+          resolve(true);
+        } else {
+          setTimeout(checkLock, 200);
+        }
+      };
+      setTimeout(checkLock, 100);
+    });
+  }
+  
+  documentLockCache.set(lockKey, { timestamp: now });
+  return true;
+};
+
+async function processEmployeeAttendanceBatch(employee, records, settings, session) {
+  const wasProrated = isEmployeeProrated(employee, settings);
+  if (wasProrated) {
+    employee.isManualPaidLeavesUpdate = true;
+  }
+  
+  for (const record of records) {
+    record.normalizedDate = normalizeDate(record.date);
+  }
+  
+  const monthlyUpdates = new Map();
+  const paidLeavesPerMonth = (settings?.paidLeavesPerYear || 24) / 12;
+  const monthGroups = new Map();
+  
+  for (const record of records) {
+    const { month, year } = getISTDateComponents(record.normalizedDate);
+    const key = `${year}-${month}`;
+    
+    if (!monthGroups.has(key)) {
+      monthGroups.set(key, { year, month, records: [] });
+    }
+    monthGroups.get(key).records.push(record);
+  }
+  
+  for (const [monthKey, { year, month, records: monthRecords }] of monthGroups) {
+    let monthlyLeave = employee.monthlyLeaves.find(ml => 
+      ml.year === year && ml.month === month
+    );
+    
+    if (!monthlyLeave) {
+      const joinDate = new Date(employee.joinDate);
+      const recordDate = new Date(year, month - 1, 1);
+      
+      if (recordDate >= joinDate) {
+        let carriedForward = 0;
+        const prevMonth = month === 1 ? 12 : month - 1;
+        const prevYear = month === 1 ? year - 1 : year;
+        
+        const previousMonthLeave = employee.monthlyLeaves.find(ml => 
+          ml.year === prevYear && ml.month === prevMonth && ml.isFinalized
+        );
+        
+        if (previousMonthLeave) {
+          carriedForward = Math.min(Math.max(previousMonthLeave.available, 0), 6);
+        }
+        
+        monthlyLeave = {
+          year,
+          month,
+          allocated: paidLeavesPerMonth,
+          taken: 0,
+          carriedForward: carriedForward,
+          available: paidLeavesPerMonth + carriedForward,
+          isFinalized: false,
+          finalizedAt: null
+        };
+        employee.monthlyLeaves.push(monthlyLeave);
+        
+        employee.monthlyLeaves.sort((a, b) => {
+          if (a.year !== b.year) return a.year - b.year;
+          return a.month - b.month;
+        });
+      }
+    }
+    
+    let netLeaveChange = 0;
+    
+    for (const record of monthRecords) {
+      if (record.existingRecord) {
+        const oldStatus = record.existingRecord.status;
+        if (oldStatus === 'leave') {
+          netLeaveChange -= 1;
+        } else if (oldStatus === 'half-day') {
+          netLeaveChange -= 0.5;
+        }
+      }
+      
+      if (record.status === 'leave') {
+        netLeaveChange += 1;
+      } else if (record.status === 'half-day') {
+        netLeaveChange += 0.5;
+      }
+    }
+    
+    if (netLeaveChange !== 0) {
+      const newTaken = Math.max(0, monthlyLeave.taken + netLeaveChange);
+      const totalAvailableForMonth = (monthlyLeave.allocated || 0) + (monthlyLeave.carriedForward || 0);
+      
+      const cappedTaken = Math.min(newTaken, totalAvailableForMonth);
+      const unpaidUsage = Math.max(0, newTaken - totalAvailableForMonth);
+      
+      if (netLeaveChange > 0 && monthlyLeave.available < netLeaveChange) {
+        throw new Error(`Employee ${employee.name} has insufficient leaves (${monthlyLeave.available}) for month ${month}/${year}`);
+      }
+      
+      monthlyUpdates.set(monthKey, {
+        year,
+        month,
+        netLeaveChange,
+        newTaken: cappedTaken,
+        newAvailable: Math.max(0, totalAvailableForMonth - cappedTaken),
+        unpaidUsage
+      });
+      
+      monthlyLeave.taken = cappedTaken;
+      monthlyLeave.available = Math.max(0, totalAvailableForMonth - cappedTaken);
+      
+      if (!monthlyLeave.unpaidUsage) monthlyLeave.unpaidUsage = 0;
+      monthlyLeave.unpaidUsage = unpaidUsage;
+    }
+  }
+  
+  if (wasProrated) {
+    employee.isManualPaidLeavesUpdate = false;
+  }
+  
+  return monthlyUpdates;
+}
+
+async function correctMonthlyLeaves(employee, year, month, session) {
+  let paidLeavesPerMonth = 2;
+  let settings = null;
+  
+  try {
+    settings = await Settings.findOne().lean().session(session);
+    paidLeavesPerMonth = settings?.paidLeavesPerYear / 12 || 2;
+  } catch (e) {
+    settings = { paidLeavesPerYear: 24 };
+    paidLeavesPerMonth = 2;
+  }
+  
+  const joinDate = new Date(employee.joinDate);
+  const joinYear = joinDate.getFullYear();
+  const joinMonth = joinDate.getMonth() + 1;
+  const fullYearAllocation = settings?.paidLeavesPerYear || 24;
+  
+  const currentAllocated = employee.paidLeaves?.allocated || 0;
+  
+  const joinedMidYear = joinMonth > 1 && joinYear === year;
+  const hasReducedAllocation = currentAllocated > 0 && currentAllocated < fullYearAllocation;
+  const isProratedFlag = employee.isProratedEmployee === true;
+  
+  const isProrated = joinedMidYear || hasReducedAllocation || isProratedFlag;
+  
+  let totalTaken = 0;
+  employee.monthlyLeaves.forEach(ml => {
+    totalTaken += (ml.taken || 0);
+  });
+  
+  if (isProrated && currentAllocated > 0) {
+    if (!employee.isManualPaidLeavesUpdate) {
+      employee.set('paidLeaves.allocated', currentAllocated);
+      employee.set('paidLeaves.available', Math.max(0, currentAllocated - totalTaken));
+      employee.set('paidLeaves.used', totalTaken);
+    }
+  } else {
+    if (!employee.isManualPaidLeavesUpdate) {
+      employee.set('paidLeaves.allocated', fullYearAllocation);
+      employee.set('paidLeaves.available', Math.max(0, fullYearAllocation - totalTaken));
+      employee.set('paidLeaves.used', totalTaken);
+    }
+  }
+  
+  employee.monthlyLeaves.sort((a, b) => {
+    if (a.year !== b.year) return a.year - b.year;
+    return a.month - b.month;
+  });
+  
+  const uniqueLeaves = [];
+  const seen = new Set();
+  for (const ml of employee.monthlyLeaves) {
+    const key = `${ml.year}-${ml.month}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueLeaves.push(ml);
+    }
+  }
+  employee.monthlyLeaves = uniqueLeaves;
+  
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  const currentMonth = currentDate.getMonth() + 1;
+  
+  for (let y = joinYear; y <= currentYear; y++) {
+    const startMonth = y === joinYear ? joinMonth : 1;
+    const endMonth = y === currentYear ? currentMonth : 12;
+    
+    for (let m = startMonth; m <= endMonth; m++) {
+      if (!employee.monthlyLeaves.find(ml => ml.year === y && ml.month === m)) {
+        employee.monthlyLeaves.push({
+          year: y,
+          month: m,
+          allocated: paidLeavesPerMonth,
+          taken: 0,
+          carriedForward: 0,
+          available: paidLeavesPerMonth,
+          isFinalized: false,
+          finalizedAt: null
+        });
+      }
+    }
+  }
+  
+  await employee.save({ session });
+}
+
+const finalizeMonthIfNeeded = async (employeeId, year, month) => {
+  try {
+    const employee = await Employee.findById(employeeId);
+    if (!employee) return false;
+
+    const monthlyLeave = employee.monthlyLeaves?.find(ml => 
+      ml.year === year && ml.month === month
+    );
+
+    if (monthlyLeave && !monthlyLeave.isFinalized) {
+      monthlyLeave.isFinalized = true;
+      monthlyLeave.finalizedAt = new Date();
+      await employee.save();
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    return false;
+  }
+};
+
+const optimizedFinalizeMonth = async (employeeId, year, month) => {
+  const cacheKey = createFinalizationKey(employeeId, year, month, 'finalize');
+  
+  const cached = finalizationCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp) < FINALIZATION_CACHE_DURATION) {
+    return cached.result;
+  }
+  
+  try {
+    await acquireDocumentLock(employeeId);
+    
+    try {
+      const result = await finalizeMonthIfNeeded(employeeId, year, month);
+      
+      finalizationCache.set(cacheKey, {
+        result,
+        timestamp: Date.now()
+      });
+      return result;
+    } finally {
+      releaseDocumentLock(employeeId);
+    }
+  } catch (error) {
+    releaseDocumentLock(employeeId);
+    if (!error.message.includes('No matching document found') &&
+        !error.message.includes('version')) {
+      // Silent error handling
+    }
+    throw error;
+  }
+};
 
 
 // Utility to execute operations with retry logic
@@ -38,17 +445,7 @@ const executeWithRetry = async (operation, maxRetries = 3) => {
   throw lastError;
 };
 
-// Correct monthly leaves for negative values
-async function correctMonthlyLeaves(employee, year, month, session) {
-  const monthlyLeave = employee.monthlyLeaves.find(
-    (ml) => ml.year === year && ml.month === month
-  );
-  if (monthlyLeave && monthlyLeave.taken < 0) {
-    monthlyLeave.taken = 0;
-    monthlyLeave.available = monthlyLeave.allocated + monthlyLeave.carriedForward;
-    await employee.save({ session });
-  }
-}
+
 
 // Update carryforward for the next month
 async function updateNextMonthCarryforward(employee, year, month, session) {
@@ -180,39 +577,7 @@ export const calculateSalaryImpact = async (req, res) => {
   }
 };
 
-// ✅ NEW: Enhanced attendance validation function
-const validateAttendanceDate = async (employeeId, date, isException = false) => {
-  try {
-    const employee = await Employee.findById(employeeId).populate('location');
-    if (!employee) {
-      throw new Error('Employee not found');
-    }
-    
-    const settings = await Settings.findOne()
-      .populate('workingDayPolicies.locations')
-      .lean();
-    
-    const isWorking = isWorkingDay(settings, employee.location._id, date);
-    const policyInfo = getWorkingDayPolicyInfo(settings, employee.location._id);
-    
-    return {
-      isWorkingDay: isWorking,
-      policyInfo,
-      canMarkAttendance: isWorking || isException,
-      requiresException: !isWorking,
-      locationName: employee.location.name,
-      employee: employee
-    };
-  } catch (error) {
-    
-    return {
-      isWorkingDay: true,
-      canMarkAttendance: true,
-      requiresException: false,
-      error: error.message
-    };
-  }
-};
+
 
 // ✅ NEW: Get working day policy for a location endpoint
 export const getLocationWorkingDayPolicy = async (req, res) => {
@@ -280,240 +645,693 @@ export const validateAttendanceDateEndpoint = async (req, res) => {
 
 
 
-export const markBulkAttendance = async (req, res) => {
+// ✅ SITEINCHARGE-SPECIFIC: Working day validation
+const validateAttendanceDate = async (employeeId, date, isException = false) => {
   try {
-    const { attendance, overwrite = false } = req.body;
-    const userId = req.user?._id;
-
-    // Validate user
-    if (!userId || !mongoose.isValidObjectId(userId)) {
-      return res.status(401).json({ message: 'User not authenticated' });
+    const employee = await Employee.findById(employeeId).populate('location');
+    if (!employee) {
+      throw new Error('Employee not found');
     }
-
-    // Validate attendance array
-    if (!Array.isArray(attendance) || attendance.length === 0) {
-      return res.status(400).json({ message: 'Invalid or empty attendance array' });
-    }
-
+    
     const settings = await Settings.findOne()
       .populate('workingDayPolicies.locations')
       .lean();
-
-    const attendanceRecords = [];
-    const errors = [];
-    const existingRecords = [];
-    const workingDayWarnings = [];
-
-    // Enhanced validation phase with working day checks
-    for (const record of attendance) {
-      const { employeeId, date, status, location, isException, exceptionReason, exceptionDescription } = record;
-
-      if (!employeeId || !date || !status || !location) {
-        errors.push({ message: `Missing required fields for employee ${employeeId}` });
-        continue;
-      }
-
-      if (!['present', 'absent', 'leave', 'half-day'].includes(status)) {
-        errors.push({ message: `Invalid status '${status}' for employee '${employeeId}'` });
-        continue;
-      }
-
-      if (!mongoose.isValidObjectId(employeeId) || !mongoose.isValidObjectId(location)) {
-        errors.push({ message: `Invalid employee or location ID for ${employeeId}` });
-        continue;
-      }
-
-      // ✅ Check if user has access to this location
-      if (!userHasLocation(req.user, location)) {
-        errors.push({ message: `Location ${location} not assigned to user` });
-        continue;
-      }
-
-      const targetDateTime = new Date(date);
-      if (isNaN(targetDateTime.getTime()) || targetDateTime > new Date()) {
-        errors.push({ message: `Invalid or future date for employee ${employeeId}: ${date}` });
-        continue;
-      }
-
-      const employee = await Employee.findById(employeeId);
-      if (!employee) {
-        errors.push({ message: `Employee ${employeeId} not found` });
-        continue;
-      }
-
-      // ✅ NEW: Working day validation
-      const validation = await validateAttendanceDate(employeeId, date, isException);
-      
-      if (!validation.canMarkAttendance) {
-        errors.push({
-          message: `Cannot mark attendance for ${employee.name} on ${date.split('T')[0]} - ${validation.policyInfo.policyName} excludes this day. Use exception marking if needed.`
-        });
-        continue;
-      }
-
-      if (validation.requiresException && !isException) {
-        workingDayWarnings.push({
-          employeeId,
-          employeeName: employee.name,
-          date: date.split('T')[0],
-          policyInfo: validation.policyInfo,
-          message: `${employee.name}: ${date.split('T')[0]} is not a working day per ${validation.policyInfo.policyName}. Consider marking as exception.`
-        });
-      }
-
-      // Exception validation
-      if (isException) {
-        if (!exceptionReason) {
-          errors.push({ message: `Exception reason is required for ${employee.name} on non-working day` });
-          continue;
-        }
-        if (exceptionReason === 'other' && !exceptionDescription) {
-          errors.push({ message: `Exception description is required when reason is 'other' for ${employee.name}` });
-          continue;
-        }
-      }
-
-      // Check for existing records
-      const dateStr = date.split('T')[0];
-      const startOfDay = `${dateStr}T00:00:00.000+05:30`;
-      const endOfDay = `${dateStr}T23:59:59.999+05:30`;
-      
-      const existingRecord = await Attendance.findOne({
-        employee: employeeId,
-        location,
-        date: { $gte: startOfDay, $lte: endOfDay },
-        isDeleted: false,
-      });
-
-      if (existingRecord && !overwrite) {
-        existingRecords.push({
-          employeeId,
-          date: existingRecord.date,
-          status: existingRecord.status,
-        });
-        continue;
-      }
-
-      // Validate location assignment
-      if (employee.location.toString() !== location) {
-        errors.push({
-          message: `Employee ${employee.name} does not belong to location ${location}`,
-        });
-        continue;
-      }
-
-      // Calculate presence days
-      let presenceDays = 0;
-      if (status === 'present') {
-        presenceDays = 1.0;
-      } else if (status === 'half-day') {
-        presenceDays = 0.5;
-      }
-
-      attendanceRecords.push({
-        employee: employeeId,
-        date,
-        status,
-        location,
-        markedBy: userId,
-        presenceDays,
-        isException: isException || false,
-        exceptionReason: exceptionReason || undefined,
-        exceptionDescription: exceptionDescription || undefined,
-        approvedBy: isException ? userId : undefined,
-        isDeleted: false,
-      });
-    }
-
-    if (errors.length > 0) {
-      return res.status(400).json({ 
-        message: 'Validation errors', 
-        errors,
-        workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
-      });
-    }
-
-    if (existingRecords.length > 0 && !overwrite) {
-      return res.status(409).json({
-        message: `Attendance already marked for ${existingRecords.length} employee(s)`,
-        existingRecords,
-        workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
-      });
-    }
-
-    // Process attendance with transaction
-    const result = await executeWithRetry(async () => {
-      const session = await mongoose.startSession();
-      try {
-        session.startTransaction();
-
-        const attendanceIds = [];
-        const year = new Date(attendanceRecords[0].date).getFullYear();
-        const month = new Date(attendanceRecords[0].date).getMonth() + 1;
-
-        for (const record of attendanceRecords) {
-          const { employee: employeeId, status, isException, exceptionReason, exceptionDescription } = record;
-          
-          
-
-          const employee = await Employee.findById(employeeId).session(session);
-          if (!employee) continue;
-
-          // Initialize monthly leaves
-          await initializeMonthlyLeaves(employee, year, month, session);
-          let monthlyLeave = employee.monthlyLeaves.find(
-            (ml) => ml.year === year && ml.month === month
-          );
-
-          // Handle leave deductions
-          if (status === 'leave') {
-            if (monthlyLeave.available < 1) {
-              throw new Error(`Insufficient leaves for ${employee.name} in ${month}/${year}`);
-            }
-            monthlyLeave.taken += 1;
-            monthlyLeave.available -= 1;
-            await employee.save({ session });
-          } else if (status === 'half-day') {
-            monthlyLeave.taken += 0.5;
-            monthlyLeave.available -= 0.5;
-            await employee.save({ session });
-          }
-
-          // Update carryforward
-          await updateNextMonthCarryforward(employee, year, month, session);
-
-          // Create attendance record
-          const attendanceRecord = new Attendance(record);
-          await attendanceRecord.save({ session });
-          attendanceIds.push(attendanceRecord._id);
-
-          
-        }
-
-        await session.commitTransaction();
-        return { attendanceIds };
-      } catch (error) {
-        await session.abortTransaction();
-        throw error;
-      } finally {
-        session.endSession();
-      }
-    });
-
-    res.status(201).json({
-      message: 'Bulk attendance marked successfully',
-      attendanceIds: result.attendanceIds,
-      workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
-    });
-
-  } catch (error) {
     
-    res.status(500).json({ 
-      message: 'Server error while marking bulk attendance', 
-      error: error.message 
-    });
+    const isWorking = isWorkingDay(settings, employee.location._id, date);
+    const policyInfo = getWorkingDayPolicyInfo(settings, employee.location._id);
+    
+    return {
+      isWorkingDay: isWorking,
+      policyInfo,
+      canMarkAttendance: isWorking || isException,
+      requiresException: !isWorking,
+      locationName: employee.location.name,
+      employee: employee
+    };
+  } catch (error) {
+    return {
+      isWorkingDay: true,
+      canMarkAttendance: true,
+      requiresException: false,
+      error: error.message
+    };
   }
 };
+
+// ============================================================================
+// MAIN BULK ATTENDANCE CONTROLLER
+// ============================================================================
+
+export const markBulkAttendance = async (req, res) => {
+  const t0 = Date.now();
+  
+  // 🚀 ENHANCED: Extended session configuration
+  const session = await mongoose.startSession({
+    defaultTransactionOptions: {
+      readPreference: 'primary',
+      readConcern: { level: 'majority' },
+      writeConcern: { 
+        w: 'majority', 
+        wtimeout: EXTENDED_TIMEOUTS.connectionTimeout
+      },
+      maxTimeMS: EXTENDED_TIMEOUTS.transactionTimeout
+    }
+  });
+
+  try {
+    await session.startTransaction({
+      readPreference: 'primary',
+      readConcern: { level: 'majority' },
+      writeConcern: { 
+        w: 'majority', 
+        wtimeout: EXTENDED_TIMEOUTS.connectionTimeout 
+      },
+      maxTimeMS: EXTENDED_TIMEOUTS.transactionTimeout
+    });
+
+    const { attendance, overwrite = false } = req.body;
+    const userId = req.user?._id;
+    const t1 = Date.now();
+
+    // Enhanced validation with early returns
+    if (!userId || !mongoose.isValidObjectId(userId)) {
+      await session.abortTransaction();
+      return res.status(401).json({ success: false, message: 'User authentication required' });
+    }
+
+    if (!attendance || !Array.isArray(attendance) || attendance.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'No attendance records provided' });
+    }
+
+    const firstRecord = attendance[0];
+    if (!firstRecord.date) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Date is required for attendance records' });
+    }
+
+    const { month, year } = getISTDateComponents(firstRecord.date);
+    const employeeIds = [...new Set(attendance.map(r => r.employeeId))];
+    const dateStr = firstRecord.date.split('T')[0];
+
+    const t2 = Date.now();
+
+    // 🚀 ENHANCED: Extended read session
+    const readSession = await mongoose.startSession();
+    
+    try {
+      const queryTimeout = EXTENDED_TIMEOUTS.queryTimeout;
+      
+      const [employees, existingRecords, settings] = await Promise.all([
+        Employee.find(
+          { _id: { $in: employeeIds }, isDeleted: false },
+          { 
+            _id: 1, 
+            employeeId: 1, 
+            name: 1, 
+            joinDate: 1, 
+            location: 1,
+            monthlyLeaves: 1,
+            __v: 1
+          }
+        ).maxTimeMS(queryTimeout).session(readSession),
+        
+        Attendance.find({
+          employee: { $in: employeeIds },
+          date: { $regex: `^${dateStr}`, $options: 'i' },
+          isDeleted: { $ne: true }
+        }, { employee: 1, date: 1, location: 1, status: 1, _id: 1 }).maxTimeMS(queryTimeout).session(readSession),
+        
+        Settings.findOne({}, { 
+          leaveSettings: 1, 
+          attendanceSettings: 1,
+          holidays: 1,
+          workingDayPolicies: 1,
+          paidLeavesPerYear: 1
+        }).populate('workingDayPolicies.locations').maxTimeMS(queryTimeout).session(readSession)
+      ]);
+
+      const t3 = Date.now();
+
+      if (employees.length === 0) {
+        await session.abortTransaction();
+        return res.status(404).json({ success: false, message: 'No valid employees found' });
+      }
+
+      // 🔥 HOLIDAY VALIDATION
+      const checkDate = new Date(firstRecord.date);
+      const checkYear = checkDate.getFullYear();
+      const checkMonth = checkDate.getMonth() + 1;
+      const uniqueLocations = [...new Set(attendance.map(record => record.location).filter(Boolean))];
+
+      const locationHolidays = {};
+      for (const locationId of uniqueLocations) {
+        const holidays = getHolidaysForLocation(settings, locationId, checkYear, checkMonth);
+        const isHoliday = holidays.some(holiday => {
+          const holidayDate = new Date(holiday.date);
+          return holidayDate.toDateString() === checkDate.toDateString();
+        });
+        
+        if (isHoliday) {
+          const holidayInfo = holidays.find(h => new Date(h.date).toDateString() === checkDate.toDateString());
+          locationHolidays[locationId] = holidayInfo;
+        }
+      }
+
+      const hasHolidays = Object.keys(locationHolidays).length > 0;
+
+      if (hasHolidays && !overwrite) {
+        const holidayNames = Object.values(locationHolidays).map(h => h.name).join(', ');
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          isHoliday: true,
+          message: `Cannot mark attendance on holiday: ${holidayNames}`,
+          holidayInfo: locationHolidays,
+          suggestion: 'Use overwrite flag or mark as exception attendance if required'
+        });
+      }
+
+      // Enhanced validation with progress tracking
+      const validationPromises = employees.map((employee, index) => {
+        return new Promise((resolve) => {
+          try {
+            validateMonthlyLeaveConsistency(employee, year, month);
+            resolve({ success: true, employeeId: employee._id });
+          } catch (error) {
+            resolve({ success: false, employeeId: employee._id, error: error.message });
+          }
+        });
+      });
+
+      const validationResults = await Promise.all(validationPromises);
+      const failedValidations = validationResults.filter(r => !r.success);
+      
+      if (failedValidations.length > 0) {
+        await session.abortTransaction();
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Employee validation failed',
+          failures: failedValidations.slice(0, 3)
+        });
+      }
+
+      const attendanceDate = new Date(firstRecord.date);
+      const validEmployeesForMonth = employees.filter(e => {
+        const joinDate = new Date(e.joinDate);
+        return joinDate <= attendanceDate;
+      });
+
+      const t4 = Date.now();
+
+      // 🚀 ENHANCED: Batch processing for leave initialization
+      const EXTENDED_BATCH_SIZE = 20;
+      const batches = [];
+      for (let i = 0; i < validEmployeesForMonth.length; i += EXTENDED_BATCH_SIZE) {
+        batches.push(validEmployeesForMonth.slice(i, i + EXTENDED_BATCH_SIZE));
+      }
+
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        const batch = batches[batchIndex];
+        await Promise.all(batch.map(async (employee) => {
+          try {
+            await acquireDocumentLock(employee._id);
+            
+            try {
+              const existingLeave = employee.monthlyLeaves?.find(ml => 
+                ml.year === year && ml.month === month
+              );
+
+              if (!existingLeave) {
+                const leaveData = calculateProratedLeaveWithCache(employee, year, month);
+                
+                if (!employee.monthlyLeaves) employee.monthlyLeaves = [];
+                
+                employee.monthlyLeaves.push({
+                  year,
+                  month,
+                  allocated: leaveData.allocated,
+                  used: 0,
+                  available: leaveData.allocated,
+                  carryForward: 0,
+                  isProrated: leaveData.status.includes('PRORATED')
+                });
+              }
+            } finally {
+              releaseDocumentLock(employee._id);
+            }
+          } catch (error) {
+            releaseDocumentLock(employee._id);
+          }
+        }));
+      }
+
+      const t5 = Date.now();
+
+      // 🚀 OPTIMIZED: Pre-build location policy map for O(1) lookups
+      const employeeMap = new Map(validEmployeesForMonth.map(e => [e._id.toString(), e]));
+      const existingRecordsMap = new Map(
+        existingRecords.map(r => [`${r.employee.toString()}_${r.date.split('T')[0]}_${r.location}`, r])
+      );
+
+      // 🚀 NEW: Create location-to-policy map ONCE (no DB queries in loop)
+      const locationPolicyMap = new Map();
+      if (settings?.workingDayPolicies) {
+        for (const policy of settings.workingDayPolicies) {
+          for (const loc of policy.locations) {
+            locationPolicyMap.set(loc._id.toString(), {
+              policyName: policy.policyName,
+              policyType: policy.policyType,
+              excludeDays: policy.excludeDays || []
+            });
+          }
+        }
+      }
+
+      // 🚀 NEW: Fast working day validator (no DB queries)
+      const fastIsWorkingDay = (locationId, date) => {
+        const policy = locationPolicyMap.get(locationId.toString());
+        if (!policy) return true; // Default: all days are working days
+        
+        const targetDate = new Date(date);
+        const dayOfWeek = targetDate.getDay(); // 0=Sunday, 6=Saturday
+        
+        switch (policy.policyType) {
+          case 'all_days':
+            return true;
+          case 'exclude_sundays':
+            return dayOfWeek !== 0;
+          case 'exclude_weekends':
+            return dayOfWeek !== 0 && dayOfWeek !== 6;
+          default:
+            return !policy.excludeDays.includes(dayOfWeek);
+        }
+      };
+
+      const processedRecords = [];
+      const skippedRecords = [];
+      const validationErrors = [];
+      const workingDayWarnings = [];
+      
+      // 🚀 OPTIMIZED VALIDATION LOOP - No DB queries!
+      for (const record of attendance) {
+        const { employeeId, date, status, location, isException, exceptionReason, exceptionDescription } = record;
+        const eid = employeeId.toString();
+        
+        if (!employeeMap.has(eid)) continue;
+        
+        const employee = employeeMap.get(eid);
+
+        // ✅ SITEINCHARGE: Location access validation
+        if (!userHasLocation(req.user, location)) {
+          validationErrors.push({ message: `Location ${location} not assigned to user` });
+          continue;
+        }
+
+        // ✅ SITEINCHARGE: Employee location validation
+        if (employee.location.toString() !== location) {
+          validationErrors.push({
+            message: `Employee ${employee.name} does not belong to location ${location}`,
+          });
+          continue;
+        }
+
+        // 🚀 OPTIMIZED: Fast working day validation (no DB queries)
+        const isWorking = fastIsWorkingDay(location, date);
+        const policyInfo = locationPolicyMap.get(location.toString()) || { 
+          policyName: 'All Calendar Days', 
+          policyType: 'all_days' 
+        };
+        
+        if (!isWorking && !isException) {
+          validationErrors.push({
+            message: `Cannot mark attendance for ${employee.name} on ${date.split('T')[0]} - ${policyInfo.policyName} excludes this day. Use exception marking if needed.`
+          });
+          continue;
+        }
+
+        if (!isWorking && !isException) {
+          workingDayWarnings.push({
+            employeeId,
+            employeeName: employee.name,
+            date: date.split('T')[0],
+            policyInfo: policyInfo,
+            message: `${employee.name}: ${date.split('T')[0]} is not a working day per ${policyInfo.policyName}. Consider marking as exception.`
+          });
+        }
+
+        // ✅ SITEINCHARGE: Exception validation
+        if (isException) {
+          if (!exceptionReason) {
+            validationErrors.push({ message: `Exception reason is required for ${employee.name} on non-working day` });
+            continue;
+          }
+          if (exceptionReason === 'other' && !exceptionDescription) {
+            validationErrors.push({ message: `Exception description is required when reason is 'other' for ${employee.name}` });
+            continue;
+          }
+        }
+
+        // Check existing records
+        const recordKey = `${eid}_${record.date.split('T')[0]}_${location}`;
+        const existingRecord = existingRecordsMap.get(recordKey);
+        
+        if (existingRecord && !overwrite) {
+          skippedRecords.push(record);
+          continue;
+        }
+        
+        processedRecords.push({
+          ...record,
+          markedBy: userId,
+          existingRecord,
+          employeeDoc: employee
+        });
+      }
+
+      const t6 = Date.now();
+
+      // Return validation errors if any
+      if (validationErrors.length > 0) {
+        await session.abortTransaction();
+        return res.status(400).json({ 
+          success: false,
+          message: 'Validation errors', 
+          errors: validationErrors,
+          workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
+        });
+      }
+
+      if (processedRecords.length === 0) {
+        await session.abortTransaction();
+        const allSkipped = skippedRecords.length > 0;
+        return res.status(allSkipped ? 409 : 400).json({
+          success: false,
+          message: allSkipped ? 'All records already exist' : 'No valid attendance records to process',
+          workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
+        });
+      }
+
+      // 🚀 ENHANCED: Employee batch processing
+      const EXTENDED_EMPLOYEE_BATCH_SIZE = 8;
+      const allBulkOps = [];
+      const processedEmployees = [];
+      const employeeRecords = new Map();
+      
+      for (const record of processedRecords) {
+        const eid = record.employeeDoc._id.toString();
+        if (!employeeRecords.has(eid)) {
+          employeeRecords.set(eid, []);
+        }
+        employeeRecords.get(eid).push(record);
+      }
+
+      const employeeEntries = Array.from(employeeRecords.entries());
+      for (let i = 0; i < employeeEntries.length; i += EXTENDED_EMPLOYEE_BATCH_SIZE) {
+        const batch = employeeEntries.slice(i, i + EXTENDED_EMPLOYEE_BATCH_SIZE);
+        
+        const batchPromises = batch.map(async ([employeeId, records]) => {
+          const employee = employeeMap.get(employeeId);
+          
+          try {
+            await acquireDocumentLock(employee._id);
+            
+            try {
+              const hasLeaveRecords = records.some(r => r.status === 'leave' || r.status === 'half-day');
+              
+              if (hasLeaveRecords) {
+                await processEmployeeAttendanceBatch(employee, records, settings, session);
+              }
+              
+              const bulkOps = [];
+              for (const record of records) {
+                let presenceDays = 0;
+                if (record.status === 'present') {
+                  presenceDays = 1.0;
+                } else if (record.status === 'half-day') {
+                  presenceDays = 0.5;
+                }
+
+                if (record.existingRecord) {
+                  bulkOps.push({
+                    updateOne: {
+                      filter: { _id: record.existingRecord._id },
+                      update: {
+                        $set: {
+                          status: record.status,
+                          isException: record.isException || false,
+                          exceptionReason: record.exceptionReason,
+                          exceptionDescription: record.exceptionDescription,
+                          markedBy: userId,
+                          presenceDays,
+                          approvedBy: record.isException ? userId : undefined,
+                        }
+                      }
+                    }
+                  });
+                } else {
+                  bulkOps.push({
+                    insertOne: {
+                      document: {
+                        employee: record.employeeId,
+                        date: record.date,
+                        status: record.status,
+                        location: record.location,
+                        isException: record.isException || false,
+                        exceptionReason: record.exceptionReason,
+                        exceptionDescription: record.exceptionDescription,
+                        markedBy: userId,
+                        presenceDays,
+                        approvedBy: record.isException ? userId : undefined,
+                        isDeleted: false
+                      }
+                    }
+                  });
+                }
+              }
+              
+              return {
+                employeeId,
+                employee,
+                bulkOps,
+                employeeInfo: {
+                  id: employee._id,
+                  employeeId: employee.employeeId,
+                  name: employee.name,
+                  year,
+                  month
+                }
+              };
+            } finally {
+              releaseDocumentLock(employee._id);
+            }
+          } catch (error) {
+            releaseDocumentLock(employee._id);
+            throw error;
+          }
+        });
+
+        const batchResults = await Promise.all(batchPromises);
+        
+        for (const result of batchResults) {
+          allBulkOps.push(...result.bulkOps);
+          processedEmployees.push(result.employeeInfo);
+          
+          // Enhanced save with retry logic
+          let saveAttempts = 0;
+          const maxAttempts = 5;
+          
+          while (saveAttempts < maxAttempts) {
+            try {
+              await result.employee.save({ session });
+              break;
+            } catch (error) {
+              if (error.name === 'VersionError' && saveAttempts < maxAttempts - 1) {
+                const freshEmployee = await Employee.findById(result.employee._id).session(session);
+                if (freshEmployee) {
+                  freshEmployee.monthlyLeaves = result.employee.monthlyLeaves;
+                  result.employee = freshEmployee;
+                }
+                saveAttempts++;
+                await new Promise(resolve => setTimeout(resolve, 100 + (saveAttempts * 50)));
+              } else {
+                throw error;
+              }
+            }
+          }
+        }
+      }
+
+      const t7 = Date.now();
+
+      // 🚀 ENHANCED: Bulk operations
+      let createdCount = 0, updatedCount = 0;
+      
+      if (allBulkOps.length > 0) {
+        const EXTENDED_BULK_SIZE = 1000;
+        for (let i = 0; i < allBulkOps.length; i += EXTENDED_BULK_SIZE) {
+          const bulkChunk = allBulkOps.slice(i, i + EXTENDED_BULK_SIZE);
+          
+          try {
+            const result = await Attendance.bulkWrite(bulkChunk, { 
+              session,
+              ordered: false,
+              writeConcern: { w: 'majority', wtimeout: 30000 }
+            });
+            
+            createdCount += result.insertedCount || 0;
+            updatedCount += result.modifiedCount || 0;
+          } catch (error) {
+            if (error.writeErrors && error.writeErrors.length > 0) {
+              createdCount += error.result?.insertedCount || 0;
+              updatedCount += error.result?.modifiedCount || 0;
+            } else {
+              throw error;
+            }
+          }
+        }
+      }
+
+      const t8 = Date.now();
+
+      try {
+        await session.commitTransaction();
+      } catch (commitError) {
+        await session.abortTransaction();
+        throw new Error('Failed to commit attendance transaction');
+      }
+
+      const t9 = Date.now();
+
+      // Background finalization
+      setImmediate(async () => {
+        try {
+          const monthlyGroups = new Map();
+          
+          processedEmployees.forEach(empInfo => {
+            const monthKey = `${empInfo.year}_${empInfo.month}`;
+            if (!monthlyGroups.has(monthKey)) {
+              monthlyGroups.set(monthKey, new Set());
+            }
+            monthlyGroups.get(monthKey).add(empInfo.id.toString());
+            
+            const prevMonth = empInfo.month === 1 ? 12 : empInfo.month - 1;
+            const prevYear = empInfo.month === 1 ? empInfo.year - 1 : empInfo.year;
+            const prevMonthKey = `${prevYear}_${prevMonth}`;
+            if (!monthlyGroups.has(prevMonthKey)) {
+              monthlyGroups.set(prevMonthKey, new Set());
+            }
+            monthlyGroups.get(prevMonthKey).add(empInfo.id.toString());
+          });
+          
+          for (const [monthKey, employeeIds] of monthlyGroups.entries()) {
+            const [year, month] = monthKey.split('_').map(Number);
+            const uniqueEmployeeIds = Array.from(employeeIds);
+            for (let i = 0; i < uniqueEmployeeIds.length; i++) {
+              const empId = uniqueEmployeeIds[i];
+              try {
+                await new Promise(resolve => setTimeout(resolve, 20));
+                
+                const freshEmployee = await Employee.findById(empId);
+                if (freshEmployee) {
+                  await correctMonthlyLeaves(freshEmployee, year, month, null);
+                }
+                
+                await optimizedFinalizeMonth(empId, year, month);
+              } catch (error) {
+                // Silent error handling
+              }
+            }
+          }
+
+          // Cache cleanup
+          const now = Date.now();
+          let cleanedCount = 0;
+          
+          for (const [key, cached] of calculationCache.entries()) {
+            if (now - cached.timestamp > CACHE_DURATION) {
+              calculationCache.delete(key);
+              cleanedCount++;
+            }
+          }
+          for (const [key, cached] of finalizationCache.entries()) {
+            if (now - cached.timestamp > FINALIZATION_CACHE_DURATION) {
+              finalizationCache.delete(key);
+              cleanedCount++;
+            }
+          }
+          for (const [key, lock] of documentLockCache.entries()) {
+            if (now - lock.timestamp > LOCK_TIMEOUT) {
+              documentLockCache.delete(key);
+              cleanedCount++;
+            }
+          }
+        } catch (error) {
+          // Silent background error handling
+        }
+      });
+
+      const t10 = Date.now();
+
+      const someSkipped = skippedRecords.length > 0;
+
+
+      return res.status(someSkipped ? 200 : 201).json({
+        success: true,
+        warning: someSkipped,
+        message: someSkipped ? 
+          `Processed ${createdCount + updatedCount} records, skipped ${skippedRecords.length} duplicates` :
+          'Bulk attendance marked successfully',
+        elapsedTimeMs: t10 - t0,
+        capacityUtilization: `${Math.round((t10 - t0) / EXTENDED_TIMEOUTS.transactionTimeout * 100)}%`,
+        statistics: {
+          totalRequested: attendance.length,
+          created: createdCount,
+          updated: updatedCount,
+          skipped: skippedRecords.length,
+          processedEmployees: processedEmployees.length,
+          validEmployees: validEmployeesForMonth.length,
+          timeoutLimit: `${EXTENDED_TIMEOUTS.transactionTimeout / 1000}s`,
+          batchSizes: {
+            employeeBatch: EXTENDED_EMPLOYEE_BATCH_SIZE,
+            bulkOperations: 1000,
+            leaveProcessing: EXTENDED_BATCH_SIZE
+          },
+          timingBreakdown: {
+            initialization: `${t2-t1}ms`,
+            databaseQueries: `${t3-t2}ms`,
+            employeeValidation: `${t4-t3}ms`,
+            leaveInitialization: `${t5-t4}ms`,
+            validationLoop: `${t6-t5}ms`,
+            employeeProcessing: `${t7-t6}ms`,
+            bulkWrite: `${t8-t7}ms`,
+            commit: `${t9-t8}ms`
+          }
+        },
+        workingDayWarnings: workingDayWarnings.length > 0 ? workingDayWarnings : undefined
+      });
+
+    } finally {
+      await readSession.endSession();
+    }
+
+  } catch (error) {
+    try {
+      await session.abortTransaction();
+    } catch (abortError) {
+      // Silent abort error handling
+    }
+    
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to mark bulk attendance',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  } finally {
+    await session.endSession();
+  }
+};
+
 
 
 
@@ -952,7 +1770,7 @@ export const getAttendance = async (req, res) => {
     }
 
     const pageNum = parseInt(page, 10);
-    const limitNum = Math.min(parseInt(limit, 10), 100);
+    const limitNum = Math.min(parseInt(limit, 10), 10000);
     if (isNaN(pageNum) || pageNum < 1 || isNaN(limitNum) || limitNum < 1) {
       return res.status(400).json({ message: "Invalid pagination parameters" });
     }
@@ -1036,7 +1854,7 @@ export const getMonthlyAttendance = async (req, res) => {
     const parsedMonth = parseInt(month) - 1;
     const parsedYear = parseInt(year);
     const pageNum = parseInt(page, 10);
-    const limitNum = Math.min(parseInt(limit, 10), 100); // Cap limit to prevent abuse
+    const limitNum = Math.min(parseInt(limit, 10), 10000); // Cap limit to prevent abuse
 
     if (
       isNaN(parsedMonth) ||
