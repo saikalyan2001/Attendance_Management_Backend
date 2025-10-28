@@ -1,18 +1,14 @@
 import jwt from 'jsonwebtoken';
-import sgMail from '@sendgrid/mail';
-import crypto from 'crypto';
 import User from '../models/User.js';
 import Location from '../models/Location.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 export const login = async (req, res) => {
   const { email, password, role } = req.body;
   
   try {
-    // Generic error message for security (prevents email enumeration)
     const genericError = "The email or password you entered is incorrect. Please try again.";
     
     if (!['admin', 'siteincharge', 'super_admin'].includes(role)) {
@@ -26,7 +22,7 @@ export const login = async (req, res) => {
 
     if (!user.password) {
       return res.status(401).json({ 
-        message: "Your account setup is incomplete. Please check your email for setup instructions.",
+        message: "Your account setup is incomplete. Please contact your administrator.",
         code: "SETUP_INCOMPLETE"
       });
     }
@@ -53,16 +49,21 @@ export const login = async (req, res) => {
       },
     });
   } catch (error) {
-
+    console.error('Login error:', error);
     res.status(500).json({ message: 'Unable to process your login request. Please try again in a few minutes.' });
   }
 };
 
 export const signup = async (req, res) => {
-  const { email, name, phone, role, locations } = req.body;
+  const { email, name, phone, role, locations, password } = req.body;
+  
   try {
     if (!['admin', 'siteincharge', 'super_admin'].includes(role)) {
       return res.status(400).json({ message: 'Please select a valid role.' });
+    }
+
+    if (!password || password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
     }
 
     if (role === 'siteincharge' && (!locations || !Array.isArray(locations) || locations.length === 0)) {
@@ -85,51 +86,20 @@ export const signup = async (req, res) => {
       }
     }
 
-    const resetPasswordToken = crypto.randomBytes(20).toString('hex');
-    const resetPasswordExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
     const user = new User({
       email,
       name,
       phone,
+      password,
       role,
       locations: role === 'siteincharge' ? locations : [],
-      resetPasswordToken,
-      resetPasswordExpires,
     });
 
     await user.save();
 
     const populatedUser = await User.findById(user._id).populate('locations');
 
-    const loginLink = `${process.env.APP_URL}/set-password?token=${resetPasswordToken}`;
-    const msg = {
-      to: email,
-      from: process.env.FROM_EMAIL,
-      subject: 'Set Up Your Account - Welcome!',
-      html: `
-        <h1>Welcome to our platform, ${name}!</h1>
-        <p>Your account has been created successfully.</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Role:</strong> ${role === 'siteincharge' ? 'Site Incharge' : role.charAt(0).toUpperCase() + role.slice(1)}</p>
-        <p>To get started, please click the link below to set your password:</p>
-        <a href="${loginLink}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Set Your Password</a>
-        <p>This link will expire in 24 hours for security reasons.</p>
-        <p><strong>Important:</strong> Please do not share this link with anyone.</p>
-        <p>If you have any questions, please contact your administrator.</p>
-      `,
-    };
-
-    try {
-      await sgMail.send(msg);
-
-    } catch (emailError) {
-
-      // Log error but don't fail the request
-    }
-
     res.status(201).json({
-      token: null,
       user: {
         _id: populatedUser._id,
         email: populatedUser.email,
@@ -140,347 +110,102 @@ export const signup = async (req, res) => {
       },
     });
   } catch (error) {
-
+    console.error('Signup error:', error);
     res.status(500).json({ message: 'Unable to create account at this time. Please try again in a few minutes.' });
   }
 };
 
-
-export const setPassword = async (req, res) => {
-  const { token, newPassword } = req.body;
+export const createSuperAdmin = async (req, res) => {
+  const { email, name, phone, password } = req.body;
+  
   try {
-    if (!token || !newPassword) {
-      return res.status(400).json({ message: 'Security token and new password are required.' });
+    if (!email || !name || !password) {
+      return res.status(400).json({ message: 'Email, name, and password are required.' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'An account with this email already exists.' });
+    }
+
+    const user = new User({
+      email,
+      name,
+      phone,
+      password,
+      role: 'super_admin',
+      locations: [],
+    });
+
+    await user.save();
+
+    const populatedUser = await User.findById(user._id).populate('locations');
+
+    res.status(201).json({
+      user: {
+        _id: populatedUser._id,
+        email: populatedUser.email,
+        name: populatedUser.name,
+        role: populatedUser.role,
+        locations: populatedUser.locations,
+        profilePicture: populatedUser.profilePicture || null,
+      },
+    });
+  } catch (error) {
+    console.error('Create super admin error:', error);
+    res.status(500).json({ message: 'Unable to create super admin account at this time.' });
+  }
+};
+
+export const resetPassword = async (req, res) => {
+  const { userId, newPassword } = req.body;
+  
+  try {
+    if (!userId || !newPassword) {
+      return res.status(400).json({ message: 'User ID and new password are required.' });
     }
 
     if (newPassword.length < 6) {
       return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
     }
 
-    // Debug logging
+    const user = await User.findById(userId);
     
-    
-    
-
-    const user = await User.findOne({
-      resetPasswordToken: token,
-      resetPasswordExpires: { $gt: new Date() },
-    });
-
     if (!user) {
-      return res.status(400).json({ 
-        message: 'The password setup link has expired or is invalid. Please request a new setup link.' 
-      });
+      return res.status(404).json({ message: 'User not found.' });
     }
 
+    // Check if the requesting user has permission to reset this password
+    const requestingUser = req.user;
     
+    // Super admin can reset anyone's password
+    // Admin can reset siteincharge passwords
+    // Users can only reset their own password
+    if (requestingUser.role === 'super_admin') {
+      // Super admin can reset any password
+    } else if (requestingUser.role === 'admin') {
+      // Admin can only reset siteincharge passwords or their own
+      if (user.role !== 'siteincharge' && user._id.toString() !== requestingUser.id) {
+        return res.status(403).json({ message: 'You do not have permission to reset this password.' });
+      }
+    } else {
+      // Regular users can only reset their own password
+      if (user._id.toString() !== requestingUser.id) {
+        return res.status(403).json({ message: 'You can only reset your own password.' });
+      }
+    }
 
     user.password = newPassword;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpires = undefined;
     await user.save();
 
-    
-
-    res.json({ message: 'Password set successfully! You can now log in with your credentials.' });
+    res.json({ message: 'Password reset successfully!' });
   } catch (error) {
-    
-    res.status(500).json({ message: 'Unable to set password at this time. Please try again or contact support.' });
-  }
-};
-
-
-export const forgotPassword = async (req, res) => {
-  const { email } = req.body;
-  try {
-    if (!email) {
-      return res.status(400).json({ message: 'Email address is required.' });
-    }
-
-    const user = await User.findOne({ email });
-    if (!user) {
-      // Return generic message to prevent email enumeration
-      return res.status(200).json({ 
-        message: 'If an account with this email exists, a password reset link has been sent.' 
-      });
-    }
-
-    const resetPasswordToken = crypto.randomBytes(20).toString('hex');
-    const resetPasswordExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    user.resetPasswordToken = resetPasswordToken;
-    user.resetPasswordExpires = resetPasswordExpires;
-    await user.save();
-
-    const resetLink = `${process.env.APP_URL}/set-password?token=${resetPasswordToken}`;
-    const msg = {
-      to: email,
-      from: process.env.FROM_EMAIL,
-      subject: 'Reset Your Password',
-      html: `
-        <h1>Password Reset Request</h1>
-        <p>Hello ${user.name},</p>
-        <p>We received a request to reset your password.</p>
-        <p>Click the link below to set a new password:</p>
-        <a href="${resetLink}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Reset Password</a>
-        <p>This link will expire in 24 hours for security reasons.</p>
-        <p>If you didn't request this password reset, please ignore this email and your password will remain unchanged.</p>
-        <p>For security reasons, please do not share this link with anyone.</p>
-      `,
-    };
-
-    try {
-      await sgMail.send(msg);
-
-      res.status(200).json({ 
-        message: 'If an account with this email exists, a password reset link has been sent.' 
-      });
-    } catch (emailError) {
-
-      res.status(200).json({ 
-        message: 'If an account with this email exists, a password reset link has been sent.' 
-      });
-    }
-  } catch (error) {
-
-    res.status(500).json({ message: 'Unable to process password reset request. Please try again in a few minutes.' });
-  }
-};
-
-export const createUserBySuperAdmin = async (req, res) => {
-  const { email, name, phone, role, locations } = req.body;
-  try {
-    if (!['admin', 'siteincharge'].includes(role)) {
-      return res.status(400).json({ message: 'Invalid role. Must be admin or siteincharge.' });
-    }
-
-    if (role === 'siteincharge' && (!locations || !Array.isArray(locations) || locations.length === 0)) {
-      return res.status(400).json({ message: 'At least one location is required for Site Incharge.' });
-    }
-
-    if (role === 'admin' && locations && locations.length > 0) {
-      return res.status(400).json({ message: 'Admins cannot be assigned locations.' });
-    }
-
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'Email already exists.' });
-    }
-
-    if (role === 'siteincharge' && locations) {
-      const validLocations = await Location.find({ _id: { $in: locations } });
-      if (validLocations.length !== locations.length) {
-        return res.status(400).json({ message: 'One or more locations are invalid.' });
-      }
-    }
-
-    const resetPasswordToken = crypto.randomBytes(20).toString('hex');
-    const resetPasswordExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    const user = new User({
-      email,
-      name,
-      phone,
-      role,
-      locations: role === 'siteincharge' ? locations : [],
-      resetPasswordToken,
-      resetPasswordExpires,
-    });
-
-    await user.save();
-
-    const populatedUser = await User.findById(user._id).populate('locations');
-
-    const loginLink = `${process.env.APP_URL}/set-password?token=${resetPasswordToken}`;
-    const msg = {
-      to: email,
-      from: process.env.FROM_EMAIL,
-      subject: 'Set Up Your Account',
-      html: `
-        <h1>Welcome, ${name}!</h1>
-        <p>Your account has been created successfully.</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Role:</strong> ${role === 'siteincharge' ? 'Site Incharge' : 'Admin'}</p>
-        <p>Please click the link below to set your password:</p>
-        <a href="${loginLink}">Set Your Password</a>
-        <p>This link will expire in 24 hours.</p>
-        <p><strong>Important:</strong> Do not share this link with anyone.</p>
-      `,
-    };
-
-    try {
-      await sgMail.send(msg);
-
-    } catch (emailError) {
-
-      // Log error but don't fail the request
-    }
-
-    res.status(201).json({
-      user: {
-        _id: populatedUser._id,
-        email: populatedUser.email,
-        name: populatedUser.name,
-        role: populatedUser.role,
-        locations: populatedUser.locations,
-        profilePicture: populatedUser.profilePicture || null,
-      },
-    });
-  } catch (error) {
-
-    res.status(500).json({ message: 'Server error during user creation.' });
-  }
-};
-
-export const createSiteIncharge = async (req, res) => {
-  const { email, name, phone, locations } = req.body;
-  try {
-    if (!email || !name || !locations || !Array.isArray(locations) || locations.length === 0) {
-      return res.status(400).json({ message: 'Email, name, and at least one location are required.' });
-    }
-
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'Email already exists.' });
-    }
-
-    const validLocations = await Location.find({ _id: { $in: locations } });
-    if (validLocations.length !== locations.length) {
-      return res.status(400).json({ message: 'One or more locations are invalid.' });
-    }
-
-    const resetPasswordToken = crypto.randomBytes(20).toString('hex');
-    const resetPasswordExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    const user = new User({
-      email,
-      name,
-      phone,
-      role: 'siteincharge',
-      locations,
-      resetPasswordToken,
-      resetPasswordExpires,
-    });
-
-    await user.save();
-
-    const populatedUser = await User.findById(user._id).populate('locations');
-
-    const loginLink = `${process.env.APP_URL}/set-password?token=${resetPasswordToken}`;
-    const msg = {
-      to: email,
-      from: process.env.FROM_EMAIL,
-      subject: 'Set Up Your Account',
-      html: `
-        <h1>Welcome, ${name}!</h1>
-        <p>Your account has been created successfully.</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Role:</strong> Site Incharge</p>
-        <p>Please click the link below to set your password:</p>
-        <a href="${loginLink}">Set Your Password</a>
-        <p>This link will expire in 24 hours.</p>
-        <p><strong>Important:</strong> Do not share this link with anyone.</p>
-      `,
-    };
-
-    try {
-      await sgMail.send(msg);
-
-    } catch (emailError) {
-
-      // Log error but don't fail the request
-    }
-
-    res.status(201).json({
-      user: {
-        _id: populatedUser._id,
-        email: populatedUser.email,
-        name: populatedUser.name,
-        role: populatedUser.role,
-        locations: populatedUser.locations,
-        profilePicture: populatedUser.profilePicture || null,
-      },
-    });
-  } catch (error) {
-
-    res.status(500).json({ message: 'Server error during site incharge creation.' });
-  }
-};
-
-export const createSuperAdmin = async (req, res) => {
-  const { email, name, phone, locations } = req.body;
-  try {
-    if (!email || !name) {
-      return res.status(400).json({ message: 'Email and name are required.' });
-    }
-
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'Email already exists.' });
-    }
-
-    if (locations && locations.length > 0) {
-      const validLocations = await Location.find({ _id: { $in: locations } });
-      if (validLocations.length !== locations.length) {
-        return res.status(400).json({ message: 'One or more locations are invalid.' });
-      }
-    }
-
-    const resetPasswordToken = crypto.randomBytes(20).toString('hex');
-    const resetPasswordExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    const user = new User({
-      email,
-      name,
-      phone,
-      role: 'super_admin',
-      locations: locations || [],
-      resetPasswordToken,
-      resetPasswordExpires,
-    });
-
-    await user.save();
-
-    const populatedUser = await User.findById(user._id).populate('locations');
-
-    const loginLink = `${process.env.APP_URL}/set-password?token=${resetPasswordToken}`;
-    const msg = {
-      to: email,
-      from: process.env.FROM_EMAIL,
-      subject: 'Set Up Your Super Admin Account',
-      html: `
-        <h1>Welcome, ${name}!</h1>
-        <p>Your super admin account has been created successfully.</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Role:</strong> Super Admin</p>
-        <p>Please click the link below to set your password:</p>
-        <a href="${loginLink}">Set Your Password</a>
-        <p>This link will expire in 24 hours.</p>
-        <p><strong>Important:</strong> Do not share this link with anyone.</p>
-      `,
-    };
-
-    try {
-      await sgMail.send(msg);
-
-    } catch (emailError) {
-
-      // Log error but don't fail the request
-    }
-
-    res.status(201).json({
-      user: {
-        _id: populatedUser._id,
-        email: populatedUser.email,
-        name: populatedUser.name,
-        role: populatedUser.role,
-        locations: populatedUser.locations,
-        profilePicture: populatedUser.profilePicture || null,
-      },
-    });
-  } catch (error) {
-
-    res.status(500).json({ message: 'Server error during super admin creation.' });
+    console.error('Reset password error:', error);
+    res.status(500).json({ message: 'Unable to reset password at this time. Please try again or contact support.' });
   }
 };
 
@@ -488,7 +213,7 @@ export const logout = async (req, res) => {
   try {
     res.json({ message: 'Logged out successfully.' });
   } catch (error) {
-
+    console.error('Logout error:', error);
     res.status(500).json({ message: 'Server error during logout.' });
   }
 };
@@ -498,7 +223,7 @@ export const getLocations = async (req, res) => {
     const locations = await Location.find().lean();
     res.json(locations);
   } catch (error) {
-
+    console.error('Get locations error:', error);
     res.status(500).json({ message: 'Server error fetching locations.' });
   }
 };
@@ -519,7 +244,7 @@ export const getMe = async (req, res) => {
       profilePicture: user.profilePicture || null,
     });
   } catch (error) {
-
+    console.error('Get me error:', error);
     res.status(500).json({ message: 'Server error fetching user data.' });
   }
 };
